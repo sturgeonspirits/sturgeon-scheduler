@@ -5,6 +5,7 @@
   <meta name="google" content="notranslate" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5,viewport-fit=cover" />
   <meta name="theme-color" content="#28343F" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="icon" href="/icons/favicon.ico" sizes="any">
@@ -456,16 +457,18 @@
           body: JSON.stringify({ action, data })
         });
         const text = await res.text();
+        let json;
         try {
-          const json = JSON.parse(text);
-          if (!json.ok) throw new Error(json.error || "Request failed");
-          if (cache) apiCache.set(key, { data: json.result, ts: Date.now() });
-          return json.result;
+          json = JSON.parse(text);
         } catch (e) {
+          // Only true JSON-parse failures land here — Apps Script returning HTML
+          // (busy/error page) or malformed output. Structured `{ok:false,error}`
+          // responses are handled below so the original error message is preserved
+          // for handleError() / showConflictPopup() (e.g. "CONFLICT|unavail|...").
           if (text.trim().toUpperCase().startsWith("<HTML")) {
             attempt++;
             if (attempt < 3) {
-              await new Promise(r => setTimeout(r, 1000 * attempt)); 
+              await new Promise(r => setTimeout(r, 1000 * attempt));
               continue;
             }
             throw new Error("Google servers are busy. Please refresh.");
@@ -473,6 +476,9 @@
           console.error("API Parse Error:", text);
           throw new Error("Invalid response from server. Check console.");
         }
+        if (!json.ok) throw new Error(json.error || "Request failed");
+        if (cache) apiCache.set(key, { data: json.result, ts: Date.now() });
+        return json.result;
       }
     })();
 
