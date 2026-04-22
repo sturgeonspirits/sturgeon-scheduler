@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+# macOS custom folder-icon marker files (named "Icon\r")
+# Cannot use a generic `Icon?` pattern because core.ignorecase=true on this
+# macOS-mounted filesystem would also match the `icons/` directory.
+/icons/Icon?
+/netlify/Icon?
+/netlify/functions/Icon?
+/Icon?
+
+# Node / Netlify
+node_modules/
+.netlify/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
