@@ -206,8 +206,17 @@
     <label>Date</label><input type="date" id="fDate">
     <div class="row">
       <div style="flex:1"><label>Start</label><input type="time" id="fStart"></div>
-      <div style="flex:1"><label>End</label><input type="time" id="fEnd"></div>
+      <div style="flex:1" id="fEndBox"><label>End</label><input type="time" id="fEnd"></div>
     </div>
+
+    <div class="toggle-row" style="margin-bottom:10px; background:#f9f9f9; padding:8px 12px; border-radius:8px;">
+      <div>
+        <div class="toggle-label">Until needed</div>
+        <div class="muted" style="font-size:11px">No set end time — manager ends the shift when ready</div>
+      </div>
+      <input type="checkbox" class="switch" id="fOpenEnded" onchange="toggleOpenEnded()">
+    </div>
+
     <label>Notes (Managers Only)</label><textarea id="fNotes" rows="2"></textarea>
 
     <div class="toggle-row">
@@ -430,6 +439,24 @@
     return `${fmtDate(s)} ${fmtTime(s)} – ${fmtDate(e)} ${fmtTime(e)}`;
   }
 
+  // Shift-aware time formatting — shows "Until needed" in place of the end
+  // time when the shift has an indeterminate end. `fmtShiftTime` returns just
+  // the start/end (e.g. "3:00 PM – Until needed"); `fmtShiftRange` prefixes
+  // it with the start date.
+  function fmtShiftTime(s) {
+    if (!s || !s.startISO) return "";
+    const start = new Date(s.startISO);
+    if (s.isOpenEnded) return `${fmtTime(start)} – Until needed`;
+    if (!s.endISO) return fmtTime(start);
+    return `${fmtTime(start)} – ${fmtTime(new Date(s.endISO))}`;
+  }
+  function fmtShiftRange(s) {
+    if (!s || !s.startISO) return "—";
+    const start = new Date(s.startISO);
+    if (s.isOpenEnded) return `${fmtDate(start)} ${fmtTime(start)} – Until needed`;
+    return fmtRange(s.startISO, s.endISO);
+  }
+
   function buildLocalDate(dateStr, timeStr) {
     const [y, m, d] = dateStr.split("-").map(Number);
     const [h, min] = timeStr.split(":").map(Number);
@@ -608,8 +635,8 @@
     const requesterName = s.fromName || staffNameFromEmail(s.fromEmail);
 
     let timeStr = '';
-    if (s.startISO && s.endISO) {
-      timeStr = `${fmtTime(new Date(s.startISO))} - ${fmtTime(new Date(s.endISO))}`;
+    if (s.startISO) {
+      timeStr = fmtShiftTime(s);
     }
 
     let actionHtml = '';
@@ -648,10 +675,10 @@
       const targetLabel = isAnyone ? 'Anyone' : esc(staffNameFromEmail(s.toEmail));
 
       let timeStr = '';
-      if (s.startISO && s.endISO) {
+      if (s.startISO) {
         const start = new Date(s.startISO);
         const dateStr = start.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'});
-        timeStr = `${dateStr} • ${fmtTime(start)} – ${fmtTime(new Date(s.endISO))}`;
+        timeStr = `${dateStr} • ${fmtShiftTime(s)}`;
       }
 
       let actionHtml = '';
@@ -930,7 +957,7 @@
               <div class="shift">
                 <div style="flex:1">
                   <div class="shift-main">${esc(s.task)} <span class="badge open">OPEN</span></div>
-                  <div class="shift-sub">${esc(fmtRange(s.startISO, s.endISO))}</div>
+                  <div class="shift-sub">${esc(fmtShiftRange(s))}</div>
                 </div>
                 <button class="btn small js-claim" data-eid="${esc(s.eventId)}">Claim</button>
               </div>
@@ -999,9 +1026,8 @@
     } else {
       html += myUpcoming.map(s => {
         const start = new Date(s.startISO);
-        const end = new Date(s.endISO);
         const dateStr = start.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'});
-        const timeStr = `${fmtTime(start)} – ${fmtTime(end)}`;
+        const timeStr = fmtShiftTime(s);
         return `
           <div class="shift">
             <div style="flex:1">
@@ -1009,7 +1035,7 @@
               <div class="shift-sub">${esc(dateStr)} • ${esc(timeStr)}</div>
               ${s.location ? `<div class="shift-sub" style="font-style:italic">${esc(s.location)}</div>` : ''}
             </div>
-            <button class="btn small accent js-req-swap" data-eid="${esc(s.eventId)}" data-task="${esc(s.task || 'Shift')}" data-date="${esc(dateStr)}" data-time="${esc(timeStr)}" data-start="${esc(s.startISO)}" data-end="${esc(s.endISO)}">Swap</button>
+            <button class="btn small accent js-req-swap" data-eid="${esc(s.eventId)}" data-task="${esc(s.task || 'Shift')}" data-date="${esc(dateStr)}" data-time="${esc(timeStr)}" data-start="${esc(s.startISO)}" data-end="${esc(s.endISO)}" data-openended="${s.isOpenEnded ? '1' : ''}">Swap</button>
           </div>
         `;
       }).join("");
@@ -1248,7 +1274,7 @@
       return `<div class="event-banner js-note" style="cursor:${canEdit?'pointer':'default'}" data-date="${esc(rawDate)}" data-text="${esc(rawText)}">${esc(s.task)}</div>`;
     }
   
-    const time = `${fmtTime(new Date(s.startISO))} - ${fmtTime(new Date(s.endISO))}`;
+    const time = fmtShiftTime(s);
     const name = s.staffName || s.staffEmail || "";
     const isMe = name === bootstrap.me.name || name === bootstrap.me.email;
 
@@ -1260,7 +1286,7 @@
           ${s.location ? `<div class="shift-sub" style="font-style:italic">${esc(s.location)}</div>` : ''}
         </div>
         <div class="row" style="gap:4px">
-          ${!canEdit && !s.isOpen && isMe ? `<button class="btn small js-req-swap" data-eid="${esc(s.eventId)}" data-task="${esc(s.task)}" data-start="${esc(s.startISO)}" data-end="${esc(s.endISO)}">Swap</button>` : ''}
+          ${!canEdit && !s.isOpen && isMe ? `<button class="btn small js-req-swap" data-eid="${esc(s.eventId)}" data-task="${esc(s.task)}" data-start="${esc(s.startISO)}" data-end="${esc(s.endISO)}" data-openended="${s.isOpenEnded ? '1' : ''}">Swap</button>` : ''}
           ${!canEdit && s.isOpen ? `<button class="btn small js-claim" data-eid="${esc(s.eventId)}">Claim</button>` : ''}
         </div>
       </div>
@@ -1287,7 +1313,7 @@
     const swapBtn = e.target.closest('.js-req-swap');
     if (swapBtn) {
       e.stopPropagation();
-      openSwapModal(swapBtn.dataset.eid, swapBtn.dataset.task, swapBtn.dataset.date, swapBtn.dataset.time, swapBtn.dataset.start, swapBtn.dataset.end);
+      openSwapModal(swapBtn.dataset.eid, swapBtn.dataset.task, swapBtn.dataset.date, swapBtn.dataset.time, swapBtn.dataset.start, swapBtn.dataset.end, swapBtn.dataset.openended === '1');
       return;
     }
     const claimSwapBtn = e.target.closest('.js-claim-swap');
@@ -1365,16 +1391,18 @@
   let swapStartISO = null;
   let swapEndISO = null;
   let swapTask = null;
+  let swapIsOpenEnded = false;
 
   function toggleSwapTarget() {
     const anyone = document.getElementById("swapAnyone").checked;
     document.getElementById("swapTargetBox").style.display = anyone ? "none" : "block";
   }
 
-  function openSwapModal(eid, task, date, time, startISO, endISO) {
+  function openSwapModal(eid, task, date, time, startISO, endISO, isOpenEnded) {
     swapEventId = eid;
     swapStartISO = startISO && startISO !== 'undefined' ? startISO : null;
     swapEndISO = endISO && endISO !== 'undefined' ? endISO : null;
+    swapIsOpenEnded = !!isOpenEnded;
     swapTask = task || "Shift";
     document.getElementById("mSwap").style.display = "flex";
 
@@ -1383,7 +1411,9 @@
     if ((!date || date === 'undefined') && swapStartISO) {
        const dt = new Date(swapStartISO);
        displayDate = dt.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'});
-       displayTime = `${fmtTime(dt)} – ${fmtTime(new Date(swapEndISO))}`;
+       displayTime = swapIsOpenEnded
+         ? `${fmtTime(dt)} – Until needed`
+         : `${fmtTime(dt)} – ${fmtTime(new Date(swapEndISO))}`;
     }
 
     document.getElementById("swapShiftInfo").innerHTML = `
@@ -1568,6 +1598,7 @@
         document.getElementById("fDate").value = isoDate(new Date(s.startISO));
         document.getElementById("fStart").value = fmtTime24(new Date(s.startISO));
         document.getElementById("fEnd").value = fmtTime24(new Date(s.endISO));
+        document.getElementById("fOpenEnded").checked = !!s.isOpenEnded;
         document.getElementById("fNotes").value = s.notes || "";
       }
     } else {
@@ -1576,22 +1607,37 @@
       document.getElementById("fDate").value = isoDate(weekStart);
       document.getElementById("fStart").value = "09:00";
       document.getElementById("fEnd").value = "17:00";
+      document.getElementById("fOpenEnded").checked = false;
       document.getElementById("fNotes").value = "";
     }
 
+    toggleOpenEnded();
     document.getElementById("fRecur").checked = false;
     document.getElementById("fRecurBox").style.display = "none";
   }
 
+  window.toggleOpenEnded = function() {
+    const isOpenEnded = document.getElementById("fOpenEnded").checked;
+    document.getElementById("fEndBox").style.display = isOpenEnded ? "none" : "";
+  };
+
   document.getElementById("btnSaveShift").onclick = async () => {
     const d = document.getElementById("fDate").value;
-    const start = buildLocalDate(d, document.getElementById("fStart").value).toISOString();
-    const end = buildLocalDate(d, document.getElementById("fEnd").value).toISOString();
+    const startDate = buildLocalDate(d, document.getElementById("fStart").value);
+    const start = startDate.toISOString();
+    const isOpenEnded = document.getElementById("fOpenEnded").checked;
+    // Open-ended shifts use a 4-hour placeholder end so Calendar events
+    // and conflict checks still work; UI hides the placeholder and shows
+    // "Until needed" instead.
+    const end = isOpenEnded
+      ? new Date(startDate.getTime() + 4 * 60 * 60 * 1000).toISOString()
+      : buildLocalDate(d, document.getElementById("fEnd").value).toISOString();
     const isOpen = document.getElementById("fIsOpen").checked;
 
     const payload = {
       sessionToken,
       isOpen: isOpen,
+      isOpenEnded: isOpenEnded,
       staffEmail: isOpen ? "__open__" : document.getElementById("fStaff").value,
       task: document.getElementById("fTask").value,
       location: document.getElementById("fLocation").value,
