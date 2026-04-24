@@ -109,24 +109,22 @@
 
     .event-banner { background:var(--accent); color:#fff; border-radius:8px; padding:8px 12px; margin-bottom:12px; text-align:center; font-weight:800; font-size:13px; text-transform:uppercase; letter-spacing:1px; box-shadow:0 2px 6px rgba(150,50,31,0.3); }
 
-    /* Admin-only: staff unavailability block on the schedule. Muted + striped
-       so it's visually distinct from assigned shifts at a glance. */
-    .unavail-block {
-      background: repeating-linear-gradient(45deg, #f3ede0, #f3ede0 8px, #ece4d3 8px, #ece4d3 16px);
-      border: 1px dashed var(--muted);
-      border-radius: 12px;
-      padding: 10px 12px;
-      margin-bottom: 8px;
+    /* Admin-only: staff unavailability marker on the schedule. Deliberately
+       understated — a thin annotation, not a card — so it never reads as a
+       scheduled shift. */
+    .unavail-row {
+      padding: 3px 8px 3px 10px;
+      margin: 2px 0 6px;
+      border-left: 3px solid var(--muted);
+      background: transparent;
       color: var(--muted);
-      font-size: 13px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
+      font-size: 12px;
+      font-style: italic;
+      line-height: 1.35;
+      opacity: 0.9;
     }
-    .unavail-block .unavail-main { font-weight: 700; color: #5a4428; }
-    .unavail-block .unavail-sub { font-size: 12px; opacity: 0.85; }
-    .unavail-block .unavail-tag { font-size: 10px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: #fff; background: var(--muted); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+    .unavail-row .unavail-who { font-weight: 600; font-style: normal; color: #7a6a50; }
+    .unavail-row .unavail-when { font-style: normal; opacity: 0.8; margin-left: 4px; }
 
     .chart-grid { display:grid; grid-template-columns:repeat(7, minmax(140px, 1fr)); gap:8px; overflow-x:auto; padding-bottom:8px; }
     .day-col { background:#fff; border:1px solid var(--border); border-radius:8px; padding:8px; min-width:140px; }
@@ -1305,18 +1303,26 @@
       return `<div class="event-banner js-note" style="cursor:${canEdit?'pointer':'default'}" data-date="${esc(rawDate)}" data-text="${esc(rawText)}">${esc(s.task)}</div>`;
     }
 
-    // Admin-only: unavailability blocks surfaced on the schedule.
+    // Admin-only: unavailability markers surfaced on the schedule.
+    // Rendered deliberately small and muted so it doesn't read as a shift.
     if (s.isUnavail) {
       const who = s.staffName || s.staffEmail || "Someone";
-      const when = fmtShiftRange(s);
-      const detail = String(s.task || "").replace(/^Unavailable\s*[—-]\s*/, "").trim();
+      const reason = String(s.reason || "").trim();
+      const segStart = new Date(s.startISO);
+      const segEnd = s.endISO ? new Date(s.endISO) : null;
+      let when = "all day";
+      if (!s.isFullDay && segEnd) {
+        const dayStart = new Date(segStart); dayStart.setHours(0,0,0,0);
+        const nextDay = new Date(dayStart.getTime() + 86400000);
+        const startsAtMidnight = segStart.getTime() === dayStart.getTime();
+        const endsAtMidnight = segEnd.getTime() === nextDay.getTime();
+        if (startsAtMidnight && !endsAtMidnight) when = `until ${fmtTime(segEnd)}`;
+        else if (!startsAtMidnight && endsAtMidnight) when = `from ${fmtTime(segStart)}`;
+        else when = `${fmtTime(segStart)} – ${fmtTime(segEnd)}`;
+      }
       return `
-        <div class="unavail-block" data-eid="${esc(s.eventId)}">
-          <div style="flex:1; min-width:0">
-            <div class="unavail-main">${esc(who)} — Unavailable${detail ? ' · ' + esc(detail) : ''}</div>
-            <div class="unavail-sub">${esc(when)}</div>
-          </div>
-          <span class="unavail-tag">Off</span>
+        <div class="unavail-row" data-eid="${esc(s.eventId)}">
+          <span class="unavail-who">${esc(who)}</span> off ${esc(when)}${reason ? ' · ' + esc(reason) : ''}
         </div>
       `;
     }
