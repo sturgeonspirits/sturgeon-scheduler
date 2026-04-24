@@ -109,6 +109,25 @@
 
     .event-banner { background:var(--accent); color:#fff; border-radius:8px; padding:8px 12px; margin-bottom:12px; text-align:center; font-weight:800; font-size:13px; text-transform:uppercase; letter-spacing:1px; box-shadow:0 2px 6px rgba(150,50,31,0.3); }
 
+    /* Admin-only: staff unavailability block on the schedule. Muted + striped
+       so it's visually distinct from assigned shifts at a glance. */
+    .unavail-block {
+      background: repeating-linear-gradient(45deg, #f3ede0, #f3ede0 8px, #ece4d3 8px, #ece4d3 16px);
+      border: 1px dashed var(--muted);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .unavail-block .unavail-main { font-weight: 700; color: #5a4428; }
+    .unavail-block .unavail-sub { font-size: 12px; opacity: 0.85; }
+    .unavail-block .unavail-tag { font-size: 10px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: #fff; background: var(--muted); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+
     .chart-grid { display:grid; grid-template-columns:repeat(7, minmax(140px, 1fr)); gap:8px; overflow-x:auto; padding-bottom:8px; }
     .day-col { background:#fff; border:1px solid var(--border); border-radius:8px; padding:8px; min-width:140px; }
     .day-head { font-size:12px; font-weight:800; color:var(--muted); margin-bottom:8px; text-align:center; }
@@ -1171,9 +1190,21 @@
         </div>
 
         <div class="card">
-          <div class="h2">Bulk Actions</div>
-          <button class="btn" style="width:100%; margin-bottom:10px;" onclick="copyWeek()">Copy Current Week to Next Week</button>
-          <div class="muted">Copies all shifts from ${esc(fmtDate(weekStart))} to next week.</div>
+          <div class="h2">Copy Week to Another Week</div>
+          <div class="muted" style="margin-bottom:10px;">Pick any source and target week (past or future). Weeks are Monday-based.</div>
+          <label style="margin-top:6px;">Source week (Monday of)</label>
+          <input type="date" id="cpSource" value="${isoDate(weekStart)}">
+          <label>Target week (Monday of)</label>
+          <input type="date" id="cpTarget" value="${isoDate(addDays(weekStart, 7))}">
+          <div class="toggle-row" style="background:#f9f9f9; padding:8px 12px; border-radius:8px; margin:8px 0;">
+            <div>
+              <div class="toggle-label">Replace target week</div>
+              <div class="muted" style="font-size:11px">Delete any existing shifts in the target week before copying. Off = add alongside existing shifts and skip per-person duplicates.</div>
+            </div>
+            <input type="checkbox" class="switch" id="cpReplace" checked>
+          </div>
+          <button class="btn primary" style="width:100%;" onclick="copyWeekFlexible(this)">Copy Shifts</button>
+          <div id="cpHint" class="muted" style="margin-top:8px; font-size:12px;"></div>
         </div>
         <div class="card">
           <div class="h2">Staff Unavailability</div>
@@ -1273,7 +1304,23 @@
       const rawText = s.task || "";
       return `<div class="event-banner js-note" style="cursor:${canEdit?'pointer':'default'}" data-date="${esc(rawDate)}" data-text="${esc(rawText)}">${esc(s.task)}</div>`;
     }
-  
+
+    // Admin-only: unavailability blocks surfaced on the schedule.
+    if (s.isUnavail) {
+      const who = s.staffName || s.staffEmail || "Someone";
+      const when = fmtShiftRange(s);
+      const detail = String(s.task || "").replace(/^Unavailable\s*[—-]\s*/, "").trim();
+      return `
+        <div class="unavail-block" data-eid="${esc(s.eventId)}">
+          <div style="flex:1; min-width:0">
+            <div class="unavail-main">${esc(who)} — Unavailable${detail ? ' · ' + esc(detail) : ''}</div>
+            <div class="unavail-sub">${esc(when)}</div>
+          </div>
+          <span class="unavail-tag">Off</span>
+        </div>
+      `;
+    }
+
     const time = fmtShiftTime(s);
     const name = s.staffName || s.staffEmail || "";
     const isMe = name === bootstrap.me.name || name === bootstrap.me.email;
@@ -1498,14 +1545,80 @@
   async function copyWeek() {
     if(!confirm("Copy current week shifts to next week?")) return;
     showToast("Copying week...");
-    try { 
+    try {
       await api("copyWeekToNext", { sessionToken, weekStartISO: weekStart.toISOString() });
       invalidateAll();
-      showToast("Week Copied"); 
-      render(true); 
+      showToast("Week Copied");
+      render(true);
     }
     catch(e) { handleError(e); }
   }
+
+  // Flexible any-week -> any-week copy with optional replace-target behavior.
+  // If target has existing shifts AND replaceTarget is on, we prompt once to
+  // confirm the destructive action so admins don't clobber a plan by accident.
+  async function copyWeekFlexible(btn) {
+    const sourceEl = document.getElementById("cpSource");
+    const targetEl = document.getElementById("cpTarget");
+    const replace = document.getElementById("cpReplace").checked;
+    const hint = document.getElementById("cpHint");
+
+    if (!sourceEl.value || !targetEl.value) { showToast("Pick both weeks"); return; }
+
+    // Normalize both to the Monday of the entered date so admins can click any
+    // day and still get a valid week boundary on the backend.
+    const [sy, sm, sd] = sourceEl.value.split("-").map(Number);
+    const [ty, tm, td] = targetEl.value.split("-").map(Number);
+    const sourceStart = snapToMonday(new Date(sy, sm - 1, sd));
+    const targetStart = snapToMonday(new Date(ty, tm - 1, td));
+
+    if (sourceStart.getTime() === targetStart.getTime()) {
+      showToast("Source and target weeks are the same");
+      return;
+    }
+
+    if (replace) {
+      // Probe for existing target-week shifts and confirm before wiping.
+      try {
+        const probe = await api("weekShiftCount", {
+          sessionToken,
+          weekStartISO: targetStart.toISOString()
+        });
+        if (probe.count > 0) {
+          const ok = confirm(
+            "Replace " + probe.count + " existing shift" + (probe.count === 1 ? "" : "s") +
+            " in the target week (" + fmtDate(targetStart) + ")?\n\n" +
+            "This will delete those shifts (and their calendar events) before copying."
+          );
+          if (!ok) return;
+        }
+      } catch (e) { handleError(e); return; }
+    }
+
+    if (btn) { btn.disabled = true; btn.textContent = "Copying..."; }
+    showToast("Copying week...");
+    try {
+      const res = await api("copyWeek", {
+        sessionToken,
+        sourceWeekStartISO: sourceStart.toISOString(),
+        targetWeekStartISO: targetStart.toISOString(),
+        replaceTarget: replace
+      });
+      invalidateAll();
+      const parts = [];
+      if (res.createdCount) parts.push(res.createdCount + " copied");
+      if (res.skippedCount) parts.push(res.skippedCount + " skipped");
+      if (res.deletedCount) parts.push(res.deletedCount + " replaced");
+      showToast(parts.length ? parts.join(" • ") : "Nothing to copy");
+      if (hint) hint.textContent = parts.join(" • ");
+      render(true);
+    } catch (e) {
+      handleError(e);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = "Copy Shifts"; }
+    }
+  }
+  window.copyWeekFlexible = copyWeekFlexible;
 
   async function editBulletin(currentMsg) {
     const msg = prompt("Update Announcement:", currentMsg || "");
