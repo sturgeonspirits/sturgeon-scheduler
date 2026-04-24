@@ -970,10 +970,12 @@
         for (const m of items) {
           if (m.type === 'open') {
             const s = m.item;
+            // v1.1 (2026-04-24): Show job and location on top line of open shift (e.g., "Bartender — Ready Room")
+            const topLine = s.location ? `${esc(s.task)} — ${esc(s.location)}` : esc(s.task);
             html += `
               <div class="shift">
                 <div style="flex:1">
-                  <div class="shift-main">${esc(s.task)} <span class="badge open">OPEN</span></div>
+                  <div class="shift-main">${topLine} <span class="badge open">OPEN</span></div>
                   <div class="shift-sub">${esc(fmtShiftRange(s))}</div>
                 </div>
                 <button class="btn small js-claim" data-eid="${esc(s.eventId)}">Claim</button>
