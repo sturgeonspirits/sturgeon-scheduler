@@ -180,8 +180,9 @@
     }
     .cat-barprep  { background:#e8f0fe; color:#1a56db; }
     .cat-shopping { background:#fef3c7; color:#b45309; }
-    .cat-cleaning { background:#d1fae5; color:#065f46; }
-    .cat-general  { background:#f3f4f6; color:#4b5563; }
+    .cat-cleaning  { background:#d1fae5; color:#065f46; }
+    .cat-prodsales { background:#ede9fe; color:#5b21b6; }
+    .cat-general   { background:#f3f4f6; color:#4b5563; }
   </style>
 </head>
 <body>
@@ -2065,8 +2066,8 @@
   document.getElementById("uaRecur").onchange = e => document.getElementById("uaRecurBox").style.display = e.target.checked ? "block" : "none";
 
   // v2 2026-05-26 — Staff To-Do List
-  const TODO_CAT_CLASS = { "Bar Prep": "barprep", "Shopping": "shopping", "Cleaning": "cleaning", "General": "general" };
-  const TODO_CATEGORIES = ["Bar Prep", "Shopping", "Cleaning", "General"];
+  const TODO_CAT_CLASS = { "Bar Prep": "barprep", "Shopping": "shopping", "Cleaning": "cleaning", "Production/Sales": "prodsales", "General": "general" };
+  const TODO_CATEGORIES = ["Bar Prep", "Shopping", "Cleaning", "Production/Sales", "General"];
 
   async function renderTasks(el, rv) {
     let data;
