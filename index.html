@@ -156,6 +156,32 @@
     .day-header .day-date { font-size:13px; font-weight:600; color:var(--muted); }
     .day-header.today { background:var(--accent); border-bottom-color:var(--accent); }
     .day-header.today .day-name, .day-header.today .day-date { color:#fff; }
+
+    /* v2 2026-05-26 — Staff To-Do List styles */
+    .todo-item {
+      background:#fff; border:1px solid var(--border); border-radius:12px;
+      padding:12px; margin-bottom:8px; display:flex; align-items:center; gap:12px;
+      transition:opacity 0.2s;
+    }
+    .todo-item.done { opacity:0.45; }
+    .todo-item.done .todo-text { text-decoration:line-through; color:var(--muted); }
+    .todo-check {
+      width:26px; height:26px; min-width:26px; border:2px solid var(--border); border-radius:7px;
+      cursor:pointer; display:flex; align-items:center; justify-content:center;
+      font-size:14px; font-weight:900; color:#fff;
+      transition:background 0.15s, border-color 0.15s;
+    }
+    .todo-check.checked { background:var(--ok); border-color:var(--ok); }
+    .todo-text { font-size:14px; font-weight:600; line-height:1.3; }
+    .todo-meta { font-size:11px; color:var(--muted); margin-top:3px; }
+    .cat-badge {
+      display:inline-block; font-size:10px; font-weight:800;
+      padding:2px 7px; border-radius:4px; margin-right:4px;
+    }
+    .cat-barprep  { background:#e8f0fe; color:#1a56db; }
+    .cat-shopping { background:#fef3c7; color:#b45309; }
+    .cat-cleaning { background:#d1fae5; color:#065f46; }
+    .cat-general  { background:#f3f4f6; color:#4b5563; }
   </style>
 </head>
 <body>
@@ -177,6 +203,7 @@
     <div class="tab active" data-tab="schedule">Schedule</div>
     <div class="tab" data-tab="open">Open</div>
     <div class="tab" data-tab="requests">Shifts</div>
+    <div class="tab" data-tab="tasks">Tasks</div>
     <div class="tab" data-tab="settings">Settings</div>
     <div class="tab" data-tab="admin" id="tabAdmin" style="display:none">Admin</div>
   </div>
@@ -187,6 +214,7 @@
   <div id="view-schedule" class="app-view" style="display:none"></div>
   <div id="view-open" class="app-view" style="display:none"></div>
   <div id="view-requests" class="app-view" style="display:none"></div>
+  <div id="view-tasks" class="app-view" style="display:none"></div>
   <div id="view-settings" class="app-view" style="display:none"></div>
   <div id="view-admin" class="app-view" style="display:none"></div>
 </div>
@@ -626,6 +654,7 @@
       if (activeTab === "schedule") await renderSchedule(view, thisRender);
       else if (activeTab === "open") await renderOpen(view, thisRender);
       else if (activeTab === "requests") await renderRequests(view, thisRender);
+      else if (activeTab === "tasks") await renderTasks(view, thisRender);
       else if (activeTab === "settings") await renderSettings(view, thisRender);
       else if (activeTab === "admin") await renderAdmin(view, thisRender);
     } catch(e) {
@@ -2034,6 +2063,131 @@
 
   document.getElementById("fRecur").onchange = e => document.getElementById("fRecurBox").style.display = e.target.checked ? "block" : "none";
   document.getElementById("uaRecur").onchange = e => document.getElementById("uaRecurBox").style.display = e.target.checked ? "block" : "none";
+
+  // v2 2026-05-26 — Staff To-Do List
+  const TODO_CAT_CLASS = { "Bar Prep": "barprep", "Shopping": "shopping", "Cleaning": "cleaning", "General": "general" };
+  const TODO_CATEGORIES = ["Bar Prep", "Shopping", "Cleaning", "General"];
+
+  async function renderTasks(el, rv) {
+    let data;
+    try {
+      data = await api("listTodos", { sessionToken }, { cache: false });
+    } catch(e) {
+      if (rv !== renderVersion) return;
+      el.innerHTML = `
+        <div class="card" style="text-align:center; padding:28px 20px;">
+          <div style="font-size:36px; margin-bottom:12px;">⚙️</div>
+          <div class="h2" style="color:var(--accent)">Backend Setup Needed</div>
+          <div class="muted" style="line-height:1.6; margin-bottom:8px;">
+            The Staff Tasks feature needs a small update to your Google Apps Script.<br>
+            Check the <strong>TASKS-GAS-SNIPPET.js</strong> file in your project folder and paste it into your scheduler.gs.
+          </div>
+        </div>`;
+      return;
+    }
+    if (rv !== renderVersion) return;
+
+    const todos = data.items || [];
+    const active = todos.filter(t => !t.done);
+    const done   = todos.filter(t => t.done);
+
+    let html = `
+      <div class="card">
+        <div class="h2" style="margin-bottom:12px">Add Task</div>
+        <input type="text" id="todoText" placeholder="e.g. Make raspberry syrup, buy OJ…">
+        <div class="row" style="gap:8px">
+          <select id="todoCat" style="flex:1; margin-bottom:0">
+            ${TODO_CATEGORIES.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+          </select>
+          <button class="btn accent" id="btnAddTodo" onclick="addTodo()" style="flex:none">+ Add</button>
+        </div>
+      </div>`;
+
+    if (!todos.length) {
+      html += `<div class="card" style="text-align:center; padding:24px;">
+        <div style="font-size:32px; margin-bottom:8px;">✅</div>
+        <div class="muted">No tasks yet — add one above!</div>
+      </div>`;
+    } else {
+      if (active.length) {
+        html += `<div class="card">
+          <div class="h2" style="margin-bottom:12px">To Do <span style="font-weight:400; color:var(--muted); font-size:14px">(${active.length})</span></div>
+          ${active.map(t => renderTodoItem(t)).join('')}
+        </div>`;
+      }
+      if (done.length) {
+        html += `<div class="card">
+          <div class="h2" style="margin-bottom:10px; color:var(--muted)">Done <span style="font-weight:400; font-size:14px">(${done.length})</span></div>
+          ${done.map(t => renderTodoItem(t)).join('')}
+          <button class="btn small danger" style="margin-top:10px; width:100%" onclick="clearDoneTodos()">Clear Completed</button>
+        </div>`;
+      }
+    }
+
+    el.innerHTML = html;
+
+    const inp = document.getElementById("todoText");
+    if (inp) inp.addEventListener("keydown", e => { if (e.key === "Enter") addTodo(); });
+  }
+
+  function renderTodoItem(t) {
+    const cls = TODO_CAT_CLASS[t.category] || "general";
+    return `
+      <div class="todo-item ${t.done ? 'done' : ''}" id="todo-${esc(t.id)}">
+        <div class="todo-check ${t.done ? 'checked' : ''}" onclick="toggleTodo('${esc(t.id)}', ${!t.done})">
+          ${t.done ? '✓' : ''}
+        </div>
+        <div style="flex:1; min-width:0">
+          <div class="todo-text">${esc(t.text)}</div>
+          <div class="todo-meta">
+            <span class="cat-badge cat-${cls}">${esc(t.category)}</span>${t.addedBy ? `Added by ${esc(t.addedBy)}` : ''}${t.done && t.doneBy ? ` · Done by ${esc(t.doneBy)}` : ''}
+          </div>
+        </div>
+        <button class="btn small danger" onclick="deleteTodo('${esc(t.id)}')">✕</button>
+      </div>`;
+  }
+
+  async function addTodo() {
+    const textEl = document.getElementById("todoText");
+    const catEl  = document.getElementById("todoCat");
+    const btn    = document.getElementById("btnAddTodo");
+    if (!textEl || !catEl) return;
+    const text = textEl.value.trim();
+    if (!text) { showToast("Enter a task first"); return; }
+    btn.disabled = true; btn.textContent = "Saving…";
+    try {
+      await api("saveTodo", { sessionToken, text, category: catEl.value });
+      textEl.value = "";
+      showToast("Task added!");
+      render(true);
+    } catch(e) { handleError(e); }
+    finally { btn.disabled = false; btn.textContent = "+ Add"; }
+  }
+
+  async function toggleTodo(id, done) {
+    const el = document.getElementById("todo-" + id);
+    if (el) el.style.opacity = "0.4";
+    try {
+      await api("toggleTodo", { sessionToken, id, done });
+      render(true);
+    } catch(e) { handleError(e); if (el) el.style.opacity = "1"; }
+  }
+
+  async function deleteTodo(id) {
+    try {
+      await api("deleteTodo", { sessionToken, id });
+      showToast("Task removed");
+      render(true);
+    } catch(e) { handleError(e); }
+  }
+
+  async function clearDoneTodos() {
+    try {
+      await api("clearDoneTodos", { sessionToken });
+      showToast("Cleared completed tasks");
+      render(true);
+    } catch(e) { handleError(e); }
+  }
 
   init();
 </script>
