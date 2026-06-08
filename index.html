@@ -265,13 +265,15 @@
 
     <label>Notes (Managers Only)</label><textarea id="fNotes" rows="2"></textarea>
 
-    <div class="toggle-row">
-      <div class="toggle-label">Repeat Weekly</div>
-      <input type="checkbox" class="switch" id="fRecur">
-    </div>
+    <label>Repeat</label>
+    <select id="fRecurType" onchange="onRecurTypeChange()">
+      <option value="none">No repeat</option>
+      <option value="weekly">Weekly</option>
+      <option value="biweekly">Biweekly (every 2 weeks)</option>
+    </select>
     <div id="fRecurBox" style="display:none; margin-bottom:16px;">
-      <label>Number of Weeks</label>
-      <input type="number" id="fWeeks" value="8" min="2" max="52">
+      <label>Number of occurrences</label>
+      <input type="number" id="fWeeks" value="8" min="2" max="26">
     </div>
 
     <div class="row" style="margin-top:20px">
@@ -1763,7 +1765,7 @@
     }
 
     toggleOpenEnded();
-    document.getElementById("fRecur").checked = false;
+    document.getElementById("fRecurType").value = "none";
     document.getElementById("fRecurBox").style.display = "none";
   }
 
@@ -1813,7 +1815,10 @@
 
     try {
       if (editing) await api("updateShift", { ...payload, eventId: editing });
-      else await api("createShift", { ...payload, repeat: { enabled: document.getElementById("fRecur").checked, weeks: document.getElementById("fWeeks").value } });
+      else {
+        const recurType = document.getElementById("fRecurType").value;
+        await api("createShift", { ...payload, repeat: { enabled: recurType !== "none", weeks: document.getElementById("fWeeks").value, interval: recurType === "biweekly" ? 2 : 1 } });
+      }
 
       invalidateAll();
       showToast(editing ? "Shift Updated!" : "Shift Created!");
@@ -2062,7 +2067,11 @@
     el.innerHTML = opts.map(o => `<option value="${esc(o.val)}" ${o.val===sel?'selected':''}>${esc(o.txt)}</option>`).join("");
   }
 
-  document.getElementById("fRecur").onchange = e => document.getElementById("fRecurBox").style.display = e.target.checked ? "block" : "none";
+  // v2.1 2026-06-08 — biweekly scheduling support
+  window.onRecurTypeChange = function() {
+    const v = document.getElementById("fRecurType").value;
+    document.getElementById("fRecurBox").style.display = v !== "none" ? "block" : "none";
+  };
   document.getElementById("uaRecur").onchange = e => document.getElementById("uaRecurBox").style.display = e.target.checked ? "block" : "none";
 
   // v2 2026-05-26 — Staff To-Do List
