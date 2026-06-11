@@ -1813,11 +1813,29 @@
       showToast("Creating shift...");
     }
 
+    // v2 2026-06-11 — apply recurrence on edit: update the current shift,
+    // then create the remaining N-1 occurrences starting at the next interval.
+    const recurType = document.getElementById("fRecurType").value;
+    const recurEnabled = recurType !== "none";
+    const recurWeeks = parseInt(document.getElementById("fWeeks").value, 10) || 8;
+    const recurInterval = recurType === "biweekly" ? 2 : 1;
+
     try {
-      if (editing) await api("updateShift", { ...payload, eventId: editing });
-      else {
-        const recurType = document.getElementById("fRecurType").value;
-        await api("createShift", { ...payload, repeat: { enabled: recurType !== "none", weeks: document.getElementById("fWeeks").value, interval: recurType === "biweekly" ? 2 : 1 } });
+      if (editing) {
+        await api("updateShift", { ...payload, eventId: editing });
+        if (recurEnabled && recurWeeks > 1) {
+          const offsetMs = recurInterval * 7 * 24 * 60 * 60 * 1000;
+          const nextStart = new Date(new Date(start).getTime() + offsetMs).toISOString();
+          const nextEnd   = new Date(new Date(end  ).getTime() + offsetMs).toISOString();
+          await api("createShift", {
+            ...payload,
+            startISO: nextStart,
+            endISO:   nextEnd,
+            repeat: { enabled: true, weeks: recurWeeks - 1, interval: recurInterval }
+          });
+        }
+      } else {
+        await api("createShift", { ...payload, repeat: { enabled: recurEnabled, weeks: recurWeeks, interval: recurInterval } });
       }
 
       invalidateAll();
