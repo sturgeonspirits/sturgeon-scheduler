@@ -677,11 +677,19 @@
     return match ? match.name : email;
   }
 
+  // v2.2 — 2026-06-30 — Let managers still edit a shift after an employee
+  // requests a swap on it. Previously, once a shift had an active swap
+  // (REQUESTED/ACCEPTED) it was rendered exclusively via this function,
+  // which had no js-edit-shift class / data-eid, so the manager's click
+  // handler had nothing to open. Managers now get the same edit affordance
+  // as a normal shift; the swap action button still works since the click
+  // handler ignores clicks inside a <button>.
   function renderSwapAsShiftItem(s) {
     const meEmail = bootstrap.me.email;
     const isAnyone = isAnyoneSwap(s);
     const isPending = s.status === 'REQUESTED' || s.status === 'ACCEPTED';
     const requesterName = s.fromName || staffNameFromEmail(s.fromEmail);
+    const canEdit = bootstrap.me.isManager;
 
     let timeStr = '';
     if (s.startISO) {
@@ -701,7 +709,7 @@
     const badgeClass = isAnyone && s.status === 'REQUESTED' ? 'open' : 'swap-pending';
 
     return `
-      <div class="shift swap-item">
+      <div class="shift swap-item ${canEdit ? 'js-edit-shift' : ''}" data-eid="${esc(s.eventId)}">
         <div style="flex:1">
           <div class="shift-main">${esc(s.task || 'Shift')} <span class="badge ${badgeClass}">${badgeLabel}</span></div>
           ${timeStr ? `<div class="shift-sub">${esc(timeStr)} • ${esc(requesterName)} needs coverage</div>` : `<div class="shift-sub">${esc(requesterName)} needs coverage</div>`}
