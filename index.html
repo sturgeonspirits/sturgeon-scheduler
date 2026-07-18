@@ -183,6 +183,34 @@
     .cat-cleaning  { background:#d1fae5; color:#065f46; }
     .cat-prodsales { background:#ede9fe; color:#5b21b6; }
     .cat-general   { background:#f3f4f6; color:#4b5563; }
+
+    /* v3 2026-07-18 — Task assignment (shift/day/person) styles */
+    .task-badge {
+      display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:800;
+      color:var(--muted); background:rgba(0,0,0,0.04); border:1px solid var(--border);
+      border-radius:8px; padding:5px 9px; cursor:pointer; min-height:30px; appearance:none;
+    }
+    .task-badge.has-open { color:var(--accent); border-color:rgba(150,50,31,0.4); background:rgba(150,50,31,0.07); }
+    .task-list-under {
+      background:rgba(0,0,0,0.02); border:1px solid var(--border); border-top:none;
+      border-radius:0 0 12px 12px; padding:4px 12px 10px; margin:-8px 0 8px;
+    }
+    .day-task-strip { margin-bottom:8px; }
+    .day-task-strip + .task-list-under { border:1px dashed var(--border); border-radius:10px; margin:0 0 10px; }
+    .task-quickadd { display:flex; gap:6px; margin-top:8px; }
+    .task-quickadd input { margin-bottom:0; padding:10px; font-size:16px; flex:1; min-width:0; }
+    .todo-item.overdue { border-left:3px solid var(--accent); }
+    .tpl-chips { display:flex; gap:8px; overflow-x:auto; padding:8px 0 2px; -webkit-overflow-scrolling:touch; }
+    .tpl-chip {
+      flex:none; border:1px solid var(--border); background:#fff; color:var(--text);
+      font-size:12px; font-weight:700; border-radius:20px; padding:8px 14px; min-height:36px; cursor:pointer;
+    }
+    .tpl-chip:active { opacity:0.6; }
+    .progress-track { height:8px; background:rgba(0,0,0,0.08); border-radius:99px; overflow:hidden; margin-bottom:10px; }
+    .progress-fill { height:100%; background:var(--ok); border-radius:99px; transition:width 0.3s; }
+    .tpl-days { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+    .tpl-days label { display:flex; align-items:center; gap:4px; font-size:12px; font-weight:700; border:1px solid var(--border); border-radius:8px; padding:8px 10px; margin:0; min-height:38px; }
+    .tpl-days input { width:auto; margin:0; }
   </style>
 </head>
 <body>
@@ -264,6 +292,23 @@
     </div>
 
     <label>Notes (Managers Only)</label><textarea id="fNotes" rows="2"></textarea>
+
+    <!-- v3 2026-07-18 — shift task checklist -->
+    <div id="fTasksBox" style="margin-bottom:12px;">
+      <label>Shift Tasks</label>
+      <div id="fTasksList"></div>
+      <div id="fTasksEditRows">
+        <div class="task-quickadd">
+          <input type="text" id="fTaskNew" placeholder="Add a task for this shift…">
+          <button class="btn small accent" type="button" onclick="addShiftModalTask()">Add</button>
+        </div>
+        <div class="row" style="gap:6px; margin-top:6px; flex-wrap:nowrap;">
+          <select id="fTaskAttach" style="flex:1; margin-bottom:0;"></select>
+          <button class="btn small" type="button" onclick="attachBacklogTask()">Attach</button>
+        </div>
+      </div>
+      <div class="muted" id="fTasksHint" style="font-size:11px; margin-top:4px;"></div>
+    </div>
 
     <label>Repeat</label>
     <select id="fRecurType" onchange="onRecurTypeChange()">
@@ -382,18 +427,90 @@
   </div>
 </div>
 
+<!-- v3 2026-07-18 — assign/schedule a task -->
+<div class="modal-back" id="mTask" onclick="if(event.target===this)closeModals()">
+  <div class="modal">
+    <div class="row" style="justify-content:space-between; margin-bottom:16px;">
+      <div class="h2" style="margin:0">Task</div>
+      <button class="btn small" onclick="closeModals()">Close</button>
+    </div>
+    <div id="taskInfo" style="background:#f9f9f9; border-radius:8px; padding:12px; margin-bottom:16px;"></div>
+    <label>Assign To</label><select id="tWho"></select>
+    <label>Date (leave blank for anytime)</label><input type="date" id="tDate">
+    <div class="row" style="margin-top:16px">
+      <button class="btn danger" id="btnDelTask" style="display:none; flex:1">Delete</button>
+      <button class="btn primary" id="btnSaveTask" style="flex:2">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- v3 2026-07-18 — task template editor (managers) -->
+<div class="modal-back" id="mTemplate" onclick="if(event.target===this)closeModals()">
+  <div class="modal">
+    <div class="row" style="justify-content:space-between; margin-bottom:16px;">
+      <div class="h2" id="mTplTitle" style="margin:0">Template</div>
+      <button class="btn small" onclick="closeModals()">Close</button>
+    </div>
+    <label>Task Text</label><input type="text" id="tplText" placeholder="e.g. Mash prep, bottling run…">
+    <label>Category</label><select id="tplCat"></select>
+    <label>Repeats</label>
+    <select id="tplRecur" onchange="onTplRecurChange()">
+      <option value="none">No repeat (one-tap add only)</option>
+      <option value="daily">Every day</option>
+      <option value="days">Specific days of the week</option>
+      <option value="weekly">Weekly (appears Monday)</option>
+      <option value="monthly">Monthly (appears the 1st)</option>
+    </select>
+    <div class="tpl-days" id="tplDaysBox" style="display:none">
+      <label><input type="checkbox" class="tpl-day" value="Mon"> Mon</label>
+      <label><input type="checkbox" class="tpl-day" value="Tue"> Tue</label>
+      <label><input type="checkbox" class="tpl-day" value="Wed"> Wed</label>
+      <label><input type="checkbox" class="tpl-day" value="Thu"> Thu</label>
+      <label><input type="checkbox" class="tpl-day" value="Fri"> Fri</label>
+      <label><input type="checkbox" class="tpl-day" value="Sat"> Sat</label>
+      <label><input type="checkbox" class="tpl-day" value="Sun"> Sun</label>
+    </div>
+    <label>Attach to Duty (optional)</label><select id="tplDuty"></select>
+    <div class="muted" style="font-size:11px; margin:-4px 0 10px;">If a shift with this duty exists that day, the task lands on that shift automatically.</div>
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Requires a reading</div>
+        <div class="muted" style="font-size:11px">Ask for a value (proof gauge, temp, count) when checked off</div>
+      </div>
+      <input type="checkbox" class="switch" id="tplProof">
+    </div>
+    <div class="toggle-row">
+      <div class="toggle-label">Active</div>
+      <input type="checkbox" class="switch" id="tplActive">
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button class="btn danger" id="btnDelTpl" style="display:none; flex:1">Delete</button>
+      <button class="btn primary" id="btnSaveTpl" style="flex:2">Save Template</button>
+    </div>
+  </div>
+</div>
+
 <script>
   const API_URL = "/.netlify/functions/scheduler";
 
   let sessionToken = localStorage.getItem("SCHED_SESSION") || "";
   let bootstrap = null;
   let activeTab = "schedule";
-  let subTabs = { schedule: "week", admin: "tools", summary: "week" }; 
+  let subTabs = { schedule: "week", admin: "tools", summary: "week", tasks: "my" };
   let globalShifts = [];
   let editing = null;
 
   // UI STATE
   let filterMyShifts = false;
+
+  // v3 2026-07-18 — task assignment state
+  let todosCache = [];
+  let templatesCache = [];
+  let todosByShift = {};
+  let todosByDay = {};
+  let expandedTasks = new Set();
+  let taskEditing = null;
+  let tplEditing = null;
 
   let renderVersion = 0;
   const apiCache = new Map();       
@@ -800,6 +917,12 @@
 
     globalShifts = schedData.shifts || [];
 
+    // v3 2026-07-18 — load tasks so shift cards & day strips can show them
+    await loadTodosSafe();
+    if (rv !== renderVersion) return;
+    syncShiftTaskAssignees();
+    buildTaskMaps();
+
     const activeSwaps = swapItems.filter(s =>
       s.startISO && (s.status === 'REQUESTED' || s.status === 'ACCEPTED')
     );
@@ -902,6 +1025,7 @@
             <span class="day-name">${esc(dayName)}${isToday ? ' — Today' : ''}</span>
             <span class="day-date">${esc(dayDateStr)}</span>
           </div>
+          ${dayTasksStrip(iso)}
           ${content}
         </div>`);
       }
@@ -953,6 +1077,7 @@
               <span style="font-weight:800; font-size:14px;">${esc(mDayName)}${isToday ? ' — Today' : ''}</span>
               <span style="font-size:12px; font-weight:600; color:var(--muted);">${esc(mDayDate)}</span>
             </div>
+            ${dayTasksStrip(k)}
             ${merged.map(m => m.type === 'shift' ? renderShiftItem(m.item) : renderSwapAsShiftItem(m.item)).join("")}
           </div>`;
         }
@@ -1198,6 +1323,10 @@
       const dashData = await api("dashAdmin", { sessionToken }, { cache: true });
       if (rv !== renderVersion) return;
 
+      // v3 2026-07-18 — need tasks + templates for the cards below
+      await loadTodosSafe();
+      if (rv !== renderVersion) return;
+
       const rawBulletin = dashData.bulletin ? dashData.bulletin.message || "" : "";
 
       let uaHtml = '';
@@ -1251,7 +1380,45 @@
           <div id="admUaList" style="max-height:300px; overflow-y:auto;">${uaHtml}</div>
         </div>
       `;
-      
+
+      // v3 2026-07-18 — Today's task progress + template manager
+      const tToday = isoDate(new Date());
+      const dueToday = todosCache.filter(t => t.date && ((!t.done && t.date <= tToday) || t.date === tToday));
+      const doneToday = dueToday.filter(t => t.done);
+      const outstanding = dueToday.filter(t => !t.done);
+      const pct = dueToday.length ? Math.round(doneToday.length / dueToday.length * 100) : 0;
+      html += `
+        <div class="card">
+          <div class="h2">Today's Tasks</div>
+          ${dueToday.length ? `
+            <div style="display:flex; justify-content:space-between; font-size:13px; font-weight:700; margin-bottom:6px;">
+              <span>${doneToday.length} of ${dueToday.length} done</span><span>${pct}%</span>
+            </div>
+            <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+            ${outstanding.length ? outstanding.map(t => `
+              <div class="row" style="justify-content:space-between; padding:8px 0; border-bottom:1px solid #eee; flex-wrap:nowrap;">
+                <div style="font-size:13px; font-weight:600; flex:1; min-width:0;">${esc(t.text)}</div>
+                <div class="muted" style="font-size:12px; flex:none;">${t.assignedTo ? esc(staffNameFromEmail(t.assignedTo)) : 'Unassigned'}</div>
+              </div>`).join("") : '<div class="muted" style="margin-top:4px;">All done!</div>'}
+          ` : '<div class="muted">No tasks scheduled for today.</div>'}
+        </div>
+        <div class="card">
+          <div class="row" style="justify-content:space-between; margin-bottom:8px;">
+            <div class="h2" style="margin:0">Task Templates</div>
+            <button class="btn small accent" onclick="openTemplateModal()">+ Template</button>
+          </div>
+          <div class="muted" style="margin-bottom:8px; font-size:12px;">Recurring production tasks appear automatically on their days. One-tap templates show as quick-add chips on the Tasks tab.</div>
+          ${templatesCache.length ? templatesCache.map(t => `
+            <div class="row" style="justify-content:space-between; padding:8px 0; border-bottom:1px solid #eee; flex-wrap:nowrap; opacity:${t.active ? 1 : 0.5};">
+              <div style="flex:1; min-width:0;">
+                <div style="font-size:13px; font-weight:700;">${esc(t.text)}</div>
+                <div class="muted" style="font-size:11px;">${esc(recurLabel(t.recurrence))}${t.targetDuty ? ' · ' + esc(t.targetDuty) : ''}${t.requireProof ? ' · needs reading' : ''}${t.active ? '' : ' · paused'}</div>
+              </div>
+              <button class="btn small" style="flex:none;" onclick="openTemplateModal('${esc(t.id)}')">Edit</button>
+            </div>`).join("") : '<div class="muted">No templates yet.</div>'}
+        </div>
+      `;
+
       el.innerHTML = html;
 
       const btnAnnounce = document.getElementById("btnAdminAnnounce");
@@ -1373,6 +1540,17 @@
     const name = s.staffName || s.staffEmail || "";
     const isMe = name === bootstrap.me.name || name === bootstrap.me.email;
 
+    // v3 2026-07-18 — task badge + inline checklist under the shift card
+    const tasks = todosByShift[s.eventId] || [];
+    const openCount = tasks.filter(t => !t.done).length;
+    const doneCount = tasks.length - openCount;
+    const taskBadge = `<button class="task-badge ${openCount ? 'has-open' : ''} js-task-badge" data-key="${esc(s.eventId)}">${tasks.length ? `☐ ${openCount}${doneCount ? ` ✓ ${doneCount}` : ''}` : '☐ +'}</button>`;
+    const taskPanel = renderTaskChecklist(String(s.eventId), tasks, {
+      shiftId: s.eventId,
+      date: s.startISO ? isoDate(new Date(s.startISO)) : '',
+      assignedTo: s.isOpen ? '' : (s.staffEmail || '')
+    });
+
     return `
       <div class="shift ${canEdit ? 'js-edit-shift' : ''}" data-eid="${esc(s.eventId)}">
         <div style="flex:1">
@@ -1381,14 +1559,53 @@
           ${s.location ? `<div class="shift-sub" style="font-style:italic">${esc(s.location)}</div>` : ''}
         </div>
         <div class="row" style="gap:4px">
+          ${taskBadge}
           ${!canEdit && !s.isOpen && isMe ? `<button class="btn small js-req-swap" data-eid="${esc(s.eventId)}" data-task="${esc(s.task)}" data-start="${esc(s.startISO)}" data-end="${esc(s.endISO)}" data-openended="${s.isOpenEnded ? '1' : ''}">Swap</button>` : ''}
           ${!canEdit && s.isOpen ? `<button class="btn small js-claim" data-eid="${esc(s.eventId)}">Claim</button>` : ''}
         </div>
       </div>
+      ${taskPanel}
     `;
   }
 
   document.querySelector('.wrap').addEventListener('click', function(e) {
+    // v3 2026-07-18 — task interactions (badges, checklists, quick-add, menus)
+    const tBadge = e.target.closest('.js-task-badge');
+    if (tBadge) {
+      e.stopPropagation();
+      togglePanel(tBadge.closest('.shift').nextElementSibling, tBadge.dataset.key);
+      return;
+    }
+    const dBadge = e.target.closest('.js-day-tasks');
+    if (dBadge) {
+      togglePanel(dBadge.closest('.day-task-strip').nextElementSibling, dBadge.dataset.key);
+      return;
+    }
+    const tCheck = e.target.closest('.js-task-check');
+    if (tCheck) {
+      toggleTodo(tCheck.dataset.id, !tCheck.dataset.done);
+      return;
+    }
+    const tMenu = e.target.closest('.js-task-menu');
+    if (tMenu) {
+      openTaskModal(tMenu.dataset.id);
+      return;
+    }
+    const tQuick = e.target.closest('.js-task-quickadd');
+    if (tQuick) {
+      quickAddTask(tQuick);
+      return;
+    }
+    const tTake = e.target.closest('.js-task-take');
+    if (tTake) {
+      takeTodo(tTake.dataset.id, tTake);
+      return;
+    }
+    const tChip = e.target.closest('.js-tpl-chip');
+    if (tChip) {
+      addFromTemplate(tChip.dataset.id, tChip);
+      return;
+    }
     const note = e.target.closest('.js-note');
     if (note && bootstrap.me.isManager) {
       openNoteModal(note.dataset.date, note.dataset.text);
@@ -1774,6 +1991,9 @@
     toggleOpenEnded();
     document.getElementById("fRecurType").value = "none";
     document.getElementById("fRecurBox").style.display = "none";
+
+    // v3 2026-07-18 — shift task checklist in the modal
+    renderShiftModalTasks(eid);
   }
 
   window.toggleOpenEnded = function() {
@@ -2103,10 +2323,185 @@
   const TODO_CAT_CLASS = { "Bar Prep": "barprep", "Shopping": "shopping", "Cleaning": "cleaning", "Production/Sales": "prodsales", "General": "general" };
   const TODO_CATEGORIES = ["Bar Prep", "Shopping", "Cleaning", "Production/Sales", "General"];
 
-  async function renderTasks(el, rv) {
-    let data;
+  // ════════════════════════════════════════════════════════════════════════
+  // v3 2026-07-18 — Task assignment system
+  // Tasks can be: backlog (no fields), day tasks (date), personal (date +
+  // assignedTo), or shift tasks (shiftId). Recurring templates materialize
+  // on the backend; undone dated tasks auto-roll forward in the display.
+  // ════════════════════════════════════════════════════════════════════════
+
+  async function loadTodosSafe(throwOnError, force) {
     try {
-      data = await api("listTodos", { sessionToken }, { cache: false });
+      if (force) invalidateCache(["listTodos"]);
+      const d = await api("listTodos", { sessionToken }, { cache: true });
+      todosCache = d.items || [];
+    } catch(e) {
+      todosCache = [];
+      if (throwOnError) throw e;
+    }
+    try {
+      const td = await api("listTemplates", { sessionToken }, { cache: true });
+      templatesCache = td.items || [];
+    } catch(_) { templatesCache = []; }
+  }
+
+  function buildTaskMaps() {
+    todosByShift = {};
+    todosByDay = {};
+    const today = isoDate(new Date());
+    for (const t of todosCache) {
+      if (t.shiftId) {
+        if (!todosByShift[t.shiftId]) todosByShift[t.shiftId] = [];
+        todosByShift[t.shiftId].push(t);
+      } else if (t.date) {
+        // auto-roll: undone dated tasks are due today, not lost in the past
+        const d = (!t.done && t.date < today) ? today : t.date;
+        if (!todosByDay[d]) todosByDay[d] = [];
+        todosByDay[d].push(t);
+      }
+    }
+  }
+
+  // Keep shift tasks consistent with whoever currently holds the shift
+  // (survives swaps/reassignment), and attach duty-targeted template tasks
+  // to their matching shift. Fire-and-forget; local state fixed immediately.
+  function syncShiftTaskAssignees() {
+    try {
+      const shiftById = {};
+      for (const s of globalShifts) shiftById[s.eventId] = s;
+      for (const t of todosCache) {
+        if (t.done) continue;
+        if (t.shiftId && shiftById[t.shiftId]) {
+          const s = shiftById[t.shiftId];
+          const email = s.isOpen ? "" : (s.staffEmail || "");
+          const date = s.startISO ? isoDate(new Date(s.startISO)) : "";
+          if ((t.assignedTo || "") !== email || (t.date || "") !== date) {
+            t.assignedTo = email; t.date = date;
+            api("updateTodo", { sessionToken, id: t.id, assignedTo: email, date }).catch(() => {});
+          }
+        } else if (t.templateId && !t.shiftId && t.date) {
+          const tpl = templatesCache.find(x => x.id === t.templateId);
+          if (tpl && tpl.targetDuty) {
+            const s = globalShifts.find(x => x.task === tpl.targetDuty && x.startISO && isoDate(new Date(x.startISO)) === t.date && !String(x.eventId).startsWith("NOTE_"));
+            if (s) {
+              t.shiftId = s.eventId;
+              t.assignedTo = s.isOpen ? "" : (s.staffEmail || "");
+              api("updateTodo", { sessionToken, id: t.id, shiftId: s.eventId, assignedTo: t.assignedTo }).catch(() => {});
+            }
+          }
+        }
+      }
+    } catch(_) {}
+  }
+
+  function fmtShortDate(dstr) {
+    if (!dstr) return "";
+    const [y, m, d] = dstr.split("-").map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  function renderTaskRow(t, opts) {
+    opts = opts || {};
+    const cls = TODO_CAT_CLASS[t.category] || "general";
+    const today = isoDate(new Date());
+    const overdue = !t.done && t.date && t.date < today;
+    const metaBits = [];
+    if (t.assignedTo) metaBits.push('→ ' + esc(staffNameFromEmail(t.assignedTo)));
+    if (t.date && opts.showDate !== false) metaBits.push(overdue ? 'since ' + esc(fmtShortDate(t.date)) : 'for ' + esc(fmtShortDate(t.date)));
+    if (t.shiftId && opts.showShift !== false) metaBits.push('shift task');
+    if (t.addedBy && t.addedBy !== 'Auto') metaBits.push('added by ' + esc(t.addedBy));
+    if (t.done && t.doneBy) metaBits.push('done by ' + esc(t.doneBy));
+    if (t.proofValue) metaBits.push('✎ ' + esc(t.proofValue));
+    return `
+      <div class="todo-item ${t.done ? 'done' : ''} ${overdue ? 'overdue' : ''}" id="todo-${esc(t.id)}">
+        <div class="todo-check ${t.done ? 'checked' : ''} js-task-check" data-id="${esc(t.id)}" data-done="${t.done ? '1' : ''}">${t.done ? '✓' : ''}</div>
+        <div style="flex:1; min-width:0">
+          <div class="todo-text">${esc(t.text)}</div>
+          <div class="todo-meta"><span class="cat-badge cat-${cls}">${esc(t.category)}</span>${metaBits.join(' · ')}</div>
+        </div>
+        ${opts.take && !t.done ? `<button class="btn small accent js-task-take" data-id="${esc(t.id)}">Take</button>` : ''}
+        <button class="btn small js-task-menu" data-id="${esc(t.id)}">⋯</button>
+      </div>`;
+  }
+
+  // Collapsible checklist panel; must be rendered as the NEXT SIBLING of its
+  // toggle's container (.shift or .day-task-strip) — the toggle handler uses
+  // nextElementSibling. ctx pre-fills the quick-add's scope.
+  function renderTaskChecklist(key, tasks, ctx) {
+    const open = expandedTasks.has(key);
+    return `
+      <div class="task-list-under" style="display:${open ? 'block' : 'none'}">
+        ${tasks.map(t => renderTaskRow(t, { showDate: false, showShift: false })).join("") || '<div class="muted" style="font-size:12px; padding:4px 0;">No tasks yet — add one below.</div>'}
+        <div class="task-quickadd">
+          <input type="text" placeholder="Add task…" class="js-task-input">
+          <button class="btn small accent js-task-quickadd" data-shiftid="${esc(ctx.shiftId || '')}" data-date="${esc(ctx.date || '')}" data-assignedto="${esc(ctx.assignedTo || '')}">Add</button>
+        </div>
+      </div>`;
+  }
+
+  function dayTasksStrip(iso) {
+    const tasks = todosByDay[iso] || [];
+    const openCount = tasks.filter(t => !t.done).length;
+    const doneCount = tasks.length - openCount;
+    const key = 'day_' + iso;
+    const label = tasks.length
+      ? `📋 ${openCount ? openCount + ' task' + (openCount === 1 ? '' : 's') + ' to do' : 'tasks done'}${doneCount ? ' ✓ ' + doneCount : ''}`
+      : '📋 + Task';
+    return `
+      <div class="day-task-strip">
+        <button class="task-badge ${openCount ? 'has-open' : ''} js-day-tasks" data-key="${esc(key)}">${label}</button>
+      </div>
+      ${renderTaskChecklist(key, tasks, { date: iso })}`;
+  }
+
+  function togglePanel(panel, key) {
+    if (!panel) return;
+    const isOpen = panel.style.display !== 'none';
+    panel.style.display = isOpen ? 'none' : 'block';
+    if (isOpen) expandedTasks.delete(key); else expandedTasks.add(key);
+  }
+
+  async function quickAddTask(btn) {
+    const input = btn.parentElement.querySelector('input');
+    const text = (input && input.value || '').trim();
+    if (!text) return showToast('Type a task first');
+    btn.disabled = true;
+    try {
+      await api('saveTodo', {
+        sessionToken, text, category: 'General',
+        date: btn.dataset.date || '',
+        shiftId: btn.dataset.shiftid || '',
+        assignedTo: btn.dataset.assignedto || ''
+      });
+      showToast('Task added');
+      render(true);
+    } catch(e) { handleError(e); btn.disabled = false; }
+  }
+
+  async function takeTodo(id, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Taking…'; }
+    try {
+      await api('updateTodo', { sessionToken, id, assignedTo: bootstrap.me.email });
+      showToast("It's yours!");
+      render(true);
+    } catch(e) { handleError(e); render(true); }
+  }
+
+  async function addFromTemplate(id, btn) {
+    const tpl = templatesCache.find(t => t.id === id);
+    if (!tpl) return;
+    if (btn) btn.disabled = true;
+    try {
+      await api('saveTodo', { sessionToken, text: tpl.text, category: tpl.category, date: isoDate(new Date()), templateId: tpl.id });
+      showToast('Added for today');
+      render(true);
+    } catch(e) { handleError(e); if (btn) btn.disabled = false; }
+  }
+
+  // ---- Tasks tab: My Tasks / Up for Grabs / All ----
+  async function renderTasks(el, rv) {
+    try {
+      await loadTodosSafe(true);
     } catch(e) {
       if (rv !== renderVersion) return;
       el.innerHTML = `
@@ -2114,7 +2509,7 @@
           <div style="font-size:36px; margin-bottom:12px;">⚙️</div>
           <div class="h2" style="color:var(--accent)">Backend Setup Needed</div>
           <div class="muted" style="line-height:1.6; margin-bottom:8px;">
-            The Staff Tasks feature needs a small update to your Google Apps Script.<br>
+            The Staff Tasks feature needs the v3 update to your Google Apps Script.<br>
             Check the <strong>TASKS-GAS-SNIPPET.js</strong> file in your project folder and paste it into your scheduler.gs.
           </div>
         </div>`;
@@ -2122,39 +2517,89 @@
     }
     if (rv !== renderVersion) return;
 
-    const todos = data.items || [];
-    const active = todos.filter(t => !t.done);
-    const done   = todos.filter(t => t.done);
+    const sub = subTabs.tasks;
+    const me = bootstrap.me;
+    const today = isoDate(new Date());
+    const todos = todosCache;
+
+    const section = (title, list, opts, titleStyle) => list.length ? `
+      <div class="card">
+        <div class="h2" style="margin-bottom:10px; ${titleStyle || ''}">${title} <span style="font-weight:400; color:var(--muted); font-size:14px">(${list.length})</span></div>
+        ${list.map(t => renderTaskRow(t, opts)).join('')}
+      </div>` : '';
 
     let html = `
+      <div class="segmented">
+        <button class="seg-btn ${sub === 'my' ? 'active' : ''}" onclick="setSub('tasks','my')">My Tasks</button>
+        <button class="seg-btn ${sub === 'grabs' ? 'active' : ''}" onclick="setSub('tasks','grabs')">Up for Grabs</button>
+        <button class="seg-btn ${sub === 'all' ? 'active' : ''}" onclick="setSub('tasks','all')">All</button>
+      </div>
       <div class="card">
         <div class="h2" style="margin-bottom:12px">Add Task</div>
         <input type="text" id="todoText" placeholder="e.g. Make raspberry syrup, buy OJ…">
-        <div class="row" style="gap:8px">
-          <select id="todoCat" style="flex:1; margin-bottom:0">
+        <div class="row" style="gap:8px; flex-wrap:nowrap;">
+          <select id="todoCat" style="flex:1; margin-bottom:0; min-width:0;">
             ${TODO_CATEGORIES.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
           </select>
+          <select id="todoWho" style="flex:1; margin-bottom:0; min-width:0;">
+            <option value="">Anyone</option>
+            ${bootstrap.staff.map(s => `<option value="${esc(s.email)}">${esc(s.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="row" style="gap:8px; margin-top:8px; flex-wrap:nowrap;">
+          <input type="date" id="todoDate" style="flex:1; margin-bottom:0; min-width:0;">
           <button class="btn accent" id="btnAddTodo" onclick="addTodo()" style="flex:none">+ Add</button>
         </div>
+        ${templatesCache.filter(t => t.active).length ? `
+          <div class="tpl-chips">
+            ${templatesCache.filter(t => t.active).map(t => `<button class="tpl-chip js-tpl-chip" data-id="${esc(t.id)}">+ ${esc(t.text)}</button>`).join('')}
+          </div>` : ''}
       </div>`;
 
-    if (!todos.length) {
-      html += `<div class="card" style="text-align:center; padding:24px;">
-        <div style="font-size:32px; margin-bottom:8px;">✅</div>
-        <div class="muted">No tasks yet — add one above!</div>
-      </div>`;
-    } else {
-      if (active.length) {
-        html += `<div class="card">
-          <div class="h2" style="margin-bottom:12px">To Do <span style="font-weight:400; color:var(--muted); font-size:14px">(${active.length})</span></div>
-          ${active.map(t => renderTodoItem(t)).join('')}
+    if (sub === 'my') {
+      const mine = todos.filter(t => t.assignedTo === me.email);
+      const overdue  = mine.filter(t => !t.done && t.date && t.date < today);
+      const dueToday = mine.filter(t => !t.done && t.date === today);
+      const upcoming = mine.filter(t => !t.done && t.date && t.date > today).sort((a, b) => a.date < b.date ? -1 : 1);
+      const anytime  = mine.filter(t => !t.done && !t.date);
+      const doneMine = mine.filter(t => t.done);
+
+      if (!mine.length) {
+        html += `<div class="card" style="text-align:center; padding:24px;">
+          <div style="font-size:32px; margin-bottom:8px;">🎉</div>
+          <div class="muted">Nothing assigned to you — check Up for Grabs.</div>
         </div>`;
+      } else {
+        html += section('Overdue', overdue, {}, 'color:var(--accent)');
+        html += section('Today', dueToday, { showDate: false });
+        html += section('Upcoming', upcoming, {});
+        html += section('Anytime', anytime, {});
+        html += section('Done', doneMine, {}, 'color:var(--muted)');
       }
+    } else if (sub === 'grabs') {
+      const grabs = todos.filter(t => !t.done && !t.assignedTo && !t.shiftId)
+        .sort((a, b) => (a.date || '9999') < (b.date || '9999') ? -1 : 1);
+      html += grabs.length
+        ? section('Up for Grabs', grabs, { take: true })
+        : `<div class="card" style="text-align:center; padding:24px;">
+            <div style="font-size:32px; margin-bottom:8px;">✅</div>
+            <div class="muted">Nothing up for grabs — everything's claimed!</div>
+          </div>`;
+    } else {
+      const active = todos.filter(t => !t.done);
+      const done = todos.filter(t => t.done);
+      html += section('To Do', active, {});
       if (done.length) {
         html += `<div class="card">
           <div class="h2" style="margin-bottom:10px; color:var(--muted)">Done <span style="font-weight:400; font-size:14px">(${done.length})</span></div>
-          ${done.map(t => renderTodoItem(t)).join('')}
+          ${done.map(t => renderTaskRow(t)).join('')}
           <button class="btn small danger" style="margin-top:10px; width:100%" onclick="clearDoneTodos()">Clear Completed</button>
+        </div>`;
+      }
+      if (!todos.length) {
+        html += `<div class="card" style="text-align:center; padding:24px;">
+          <div style="font-size:32px; margin-bottom:8px;">✅</div>
+          <div class="muted">No tasks yet — add one above!</div>
         </div>`;
       }
     }
@@ -2165,33 +2610,20 @@
     if (inp) inp.addEventListener("keydown", e => { if (e.key === "Enter") addTodo(); });
   }
 
-  function renderTodoItem(t) {
-    const cls = TODO_CAT_CLASS[t.category] || "general";
-    return `
-      <div class="todo-item ${t.done ? 'done' : ''}" id="todo-${esc(t.id)}">
-        <div class="todo-check ${t.done ? 'checked' : ''}" onclick="toggleTodo('${esc(t.id)}', ${!t.done})">
-          ${t.done ? '✓' : ''}
-        </div>
-        <div style="flex:1; min-width:0">
-          <div class="todo-text">${esc(t.text)}</div>
-          <div class="todo-meta">
-            <span class="cat-badge cat-${cls}">${esc(t.category)}</span>${t.addedBy ? `Added by ${esc(t.addedBy)}` : ''}${t.done && t.doneBy ? ` · Done by ${esc(t.doneBy)}` : ''}
-          </div>
-        </div>
-        <button class="btn small danger" onclick="deleteTodo('${esc(t.id)}')">✕</button>
-      </div>`;
-  }
-
   async function addTodo() {
     const textEl = document.getElementById("todoText");
-    const catEl  = document.getElementById("todoCat");
-    const btn    = document.getElementById("btnAddTodo");
-    if (!textEl || !catEl) return;
+    if (!textEl) return;
     const text = textEl.value.trim();
     if (!text) { showToast("Enter a task first"); return; }
+    const btn = document.getElementById("btnAddTodo");
     btn.disabled = true; btn.textContent = "Saving…";
     try {
-      await api("saveTodo", { sessionToken, text, category: catEl.value });
+      await api("saveTodo", {
+        sessionToken, text,
+        category: document.getElementById("todoCat").value,
+        assignedTo: document.getElementById("todoWho").value,
+        date: document.getElementById("todoDate").value
+      });
       textEl.value = "";
       showToast("Task added!");
       render(true);
@@ -2200,10 +2632,20 @@
   }
 
   async function toggleTodo(id, done) {
+    // v3 — proof prompt for templates that require a reading
+    let proofValue = "";
+    const t = todosCache.find(x => x.id === id);
+    if (done && t && t.templateId) {
+      const tpl = templatesCache.find(x => x.id === t.templateId);
+      if (tpl && tpl.requireProof) {
+        proofValue = prompt("Enter the reading/value for:\n" + t.text, "");
+        if (proofValue === null) return; // cancelled
+      }
+    }
     const el = document.getElementById("todo-" + id);
     if (el) el.style.opacity = "0.4";
     try {
-      await api("toggleTodo", { sessionToken, id, done });
+      await api("toggleTodo", { sessionToken, id, done, proofValue });
       render(true);
     } catch(e) { handleError(e); if (el) el.style.opacity = "1"; }
   }
@@ -2223,6 +2665,190 @@
       render(true);
     } catch(e) { handleError(e); }
   }
+
+  // ---- Task modal (assign / schedule / delete) ----
+  function openTaskModal(id) {
+    const t = todosCache.find(x => x.id === id);
+    if (!t) return;
+    taskEditing = id;
+    document.getElementById("mTask").style.display = "flex";
+    document.getElementById("taskInfo").innerHTML = `
+      <div style="font-weight:700; font-size:14px; margin-bottom:2px;">${esc(t.text)}</div>
+      <div class="muted" style="font-size:12px;">${esc(t.category)}${t.addedBy && t.addedBy !== 'Auto' ? ' · added by ' + esc(t.addedBy) : ''}${t.shiftId ? ' · attached to a shift' : ''}</div>`;
+    document.getElementById("tWho").innerHTML =
+      '<option value="">Anyone (unassigned)</option>' +
+      bootstrap.staff.map(s => `<option value="${esc(s.email)}" ${s.email === t.assignedTo ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+    document.getElementById("tDate").value = t.date || "";
+    const canDel = bootstrap.me.isManager || t.addedBy === bootstrap.me.name;
+    document.getElementById("btnDelTask").style.display = canDel ? "block" : "none";
+  }
+
+  document.getElementById("btnSaveTask").onclick = async () => {
+    const id = taskEditing;
+    closeModals();
+    showToast("Saving…");
+    try {
+      await api("updateTodo", {
+        sessionToken, id,
+        assignedTo: document.getElementById("tWho").value,
+        date: document.getElementById("tDate").value
+      });
+      showToast("Task updated");
+      render(true);
+    } catch(e) { handleError(e); }
+  };
+
+  document.getElementById("btnDelTask").onclick = async () => {
+    if (!confirm("Delete this task?")) return;
+    const id = taskEditing;
+    closeModals();
+    deleteTodo(id);
+  };
+
+  // ---- Shift modal task checklist ----
+  function renderShiftModalTasks(eid) {
+    const listEl = document.getElementById("fTasksList");
+    const hint = document.getElementById("fTasksHint");
+    const editRows = document.getElementById("fTasksEditRows");
+    if (!eid) {
+      listEl.innerHTML = "";
+      editRows.style.display = "none";
+      hint.textContent = "Save the shift first, then reopen it to add tasks.";
+      return;
+    }
+    editRows.style.display = "block";
+    hint.textContent = "";
+    const tasks = todosByShift[eid] || [];
+    listEl.innerHTML = tasks.length ? tasks.map(t => `
+      <div class="row" style="justify-content:space-between; padding:6px 0; border-bottom:1px solid #eee; flex-wrap:nowrap;">
+        <div style="font-size:13px; flex:1; min-width:0; ${t.done ? 'text-decoration:line-through; color:var(--muted);' : ''}">${esc(t.text)}</div>
+        <button class="btn small danger" type="button" style="flex:none;" onclick="detachShiftTask('${esc(t.id)}')">✕</button>
+      </div>`).join("") : '<div class="muted" style="font-size:12px; padding:2px 0 6px;">No tasks on this shift.</div>';
+    const backlog = todosCache.filter(t => !t.done && !t.shiftId && !t.assignedTo);
+    document.getElementById("fTaskAttach").innerHTML =
+      '<option value="">Attach from task list…</option>' +
+      backlog.map(t => `<option value="${esc(t.id)}">${esc(t.text)}</option>`).join("");
+  }
+
+  async function refreshShiftModalTasks() {
+    await loadTodosSafe(false, true);
+    syncShiftTaskAssignees();
+    buildTaskMaps();
+    renderShiftModalTasks(editing);
+  }
+
+  window.addShiftModalTask = async function() {
+    const inp = document.getElementById("fTaskNew");
+    const text = (inp.value || "").trim();
+    if (!text) return showToast("Type a task first");
+    if (!editing) return;
+    const s = globalShifts.find(x => x.eventId === editing);
+    try {
+      await api("saveTodo", {
+        sessionToken, text, category: "General",
+        shiftId: editing,
+        date: s && s.startISO ? isoDate(new Date(s.startISO)) : "",
+        assignedTo: s && !s.isOpen ? (s.staffEmail || "") : ""
+      });
+      inp.value = "";
+      showToast("Task added");
+      await refreshShiftModalTasks();
+    } catch(e) { handleError(e); }
+  };
+
+  window.attachBacklogTask = async function() {
+    const sel = document.getElementById("fTaskAttach");
+    if (!sel.value || !editing) return;
+    const s = globalShifts.find(x => x.eventId === editing);
+    try {
+      await api("updateTodo", {
+        sessionToken, id: sel.value,
+        shiftId: editing,
+        date: s && s.startISO ? isoDate(new Date(s.startISO)) : "",
+        assignedTo: s && !s.isOpen ? (s.staffEmail || "") : ""
+      });
+      showToast("Task attached");
+      await refreshShiftModalTasks();
+    } catch(e) { handleError(e); }
+  };
+
+  window.detachShiftTask = async function(id) {
+    try {
+      await api("updateTodo", { sessionToken, id, shiftId: "" });
+      await refreshShiftModalTasks();
+    } catch(e) { handleError(e); }
+  };
+
+  // ---- Template manager (managers, Admin → Tools) ----
+  function recurLabel(r) {
+    if (r === "daily") return "Every day";
+    if (r === "weekly") return "Weekly (Mon)";
+    if (r === "monthly") return "Monthly (1st)";
+    if (r && r.indexOf("days:") === 0) return "Every " + r.substring(5);
+    return "One-tap only";
+  }
+
+  window.openTemplateModal = function(id) {
+    tplEditing = id || null;
+    const t = id ? templatesCache.find(x => x.id === id) : null;
+    document.getElementById("mTemplate").style.display = "flex";
+    document.getElementById("mTplTitle").textContent = t ? "Edit Template" : "New Template";
+    document.getElementById("tplText").value = t ? t.text : "";
+    fillSelect("tplCat", TODO_CATEGORIES.map(c => ({ val: c, txt: c })), t ? t.category : "Production/Sales");
+    const recur = t ? t.recurrence : "daily";
+    document.getElementById("tplRecur").value = recur.indexOf("days:") === 0 ? "days" : recur;
+    onTplRecurChange();
+    const days = recur.indexOf("days:") === 0 ? recur.substring(5).split(",") : [];
+    document.querySelectorAll(".tpl-day").forEach(cb => cb.checked = days.indexOf(cb.value) >= 0);
+    fillSelect("tplDuty", [{ val: "", txt: "Any / none" }].concat(bootstrap.tasks.map(x => ({ val: x, txt: x }))), t ? t.targetDuty : "");
+    document.getElementById("tplProof").checked = t ? t.requireProof : false;
+    document.getElementById("tplActive").checked = t ? t.active : true;
+    document.getElementById("btnDelTpl").style.display = t ? "block" : "none";
+  };
+
+  window.onTplRecurChange = function() {
+    document.getElementById("tplDaysBox").style.display =
+      document.getElementById("tplRecur").value === "days" ? "flex" : "none";
+  };
+
+  document.getElementById("btnSaveTpl").onclick = async () => {
+    const text = document.getElementById("tplText").value.trim();
+    if (!text) return showToast("Enter the task text");
+    let recurrence = document.getElementById("tplRecur").value;
+    if (recurrence === "days") {
+      const days = [...document.querySelectorAll(".tpl-day")].filter(cb => cb.checked).map(cb => cb.value);
+      if (!days.length) return showToast("Pick at least one day");
+      recurrence = "days:" + days.join(",");
+    }
+    const payload = {
+      sessionToken,
+      id: tplEditing || "",
+      text,
+      category: document.getElementById("tplCat").value,
+      recurrence,
+      targetDuty: document.getElementById("tplDuty").value,
+      requireProof: document.getElementById("tplProof").checked,
+      active: document.getElementById("tplActive").checked
+    };
+    closeModals();
+    showToast("Saving template…");
+    try {
+      await api("saveTemplate", payload);
+      showToast("Template saved");
+      render(true);
+    } catch(e) { handleError(e); }
+  };
+
+  document.getElementById("btnDelTpl").onclick = async () => {
+    if (!confirm("Delete this template? Already-created tasks are kept.")) return;
+    const id = tplEditing;
+    closeModals();
+    try {
+      await api("deleteTemplate", { sessionToken, id });
+      showToast("Template deleted");
+      render(true);
+    } catch(e) { handleError(e); }
+  };
 
   init();
 </script>
