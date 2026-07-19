@@ -1,5 +1,8 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v6.4 — Hourly rollover: unfinished shift tasks move to the person's next
+ *        shift, or back to Up for Grabs if none (2026-07-18)
+ * v6.3 — Person+date tasks auto-attach to that person's shift; warn if none (2026-07-18)
  * v6.2 — Auto-hide past swap requests & unavailability (2026-07-18)
  * v6.1 — Per-person ICS calendar feeds (2026-07-18)
  * v6.0 — Task assignment: shift/day/person tasks, recurring TaskTemplates,
@@ -196,7 +199,9 @@ function installTriggers() {
   const triggers = ScriptApp.getProjectTriggers();
   triggers.forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger("sendShiftReminders").timeBased().everyHours(1).create();
-  SpreadsheetApp.getUi().alert("Triggers installed (Hourly Reminders).");
+  // v6.4 2026-07-18 — unfinished shift tasks roll to the person's next shift
+  ScriptApp.newTrigger("rollUnfinishedShiftTasks").timeBased().everyHours(1).create();
+  SpreadsheetApp.getUi().alert("Triggers installed (Hourly Reminders + Task Rollover).");
 }
 
 function setupSheets() {
@@ -1734,12 +1739,35 @@ function api_listTodos(data) {
   return { items };
 }
 
+// v6.3 2026-07-18 — resolve person+date to their shift that day (Central time)
+function _findShiftFor_(email, dateStr) {
+  if (!email || !dateStr) return null;
+  return _getShiftsCached_().find(s =>
+    !_asBool_(s.isOpen) &&
+    _normEmail_(s.staffEmail) === email &&
+    s.startISO &&
+    Utilities.formatDate(new Date(s.startISO), TZ_CENTRAL, "yyyy-MM-dd") === dateStr
+  ) || null;
+}
+
 function api_saveTodo(data) {
   const me = _requireSession_(data.sessionToken);
   _ensureTodosSchema_();
   const text = String(data.text || "").trim();
   if (!text) throw new Error("No task text provided");
   const id = "todo_" + Date.now() + "_" + Math.floor(Math.random() * 10000);
+
+  // v6.3 2026-07-18 — person+date tasks auto-attach to that person's shift;
+  // caller is told when there is no shift so the UI can warn.
+  const assignedTo = _normEmail_(data.assignedTo);
+  const date = _todoDateStr_(data.date);
+  let shiftId = String(data.shiftId || "");
+  let attached = false, noShift = false;
+  if (!shiftId && assignedTo && date) {
+    const s = _findShiftFor_(assignedTo, date);
+    if (s) { shiftId = String(s.eventId); attached = true; } else { noShift = true; }
+  }
+
   _appendRow_(SHEET_TODOS, {
     id,
     text,
@@ -1749,13 +1777,13 @@ function api_saveTodo(data) {
     addedAt:    new Date().toISOString(),
     doneBy:     "",
     doneAt:     "",
-    date:       _todoDateStr_(data.date),
-    shiftId:    String(data.shiftId || ""),
-    assignedTo: _normEmail_(data.assignedTo),
+    date:       date,
+    shiftId:    shiftId,
+    assignedTo: assignedTo,
     proofValue: "",
     templateId: String(data.templateId || "")
   });
-  return { id };
+  return { id, attached, noShift };
 }
 
 // v6.0 — update assignment/scheduling (and optionally text/category).
@@ -1770,9 +1798,24 @@ function api_updateTodo(data) {
   if (data.shiftId    !== undefined) patch.shiftId = String(data.shiftId);
   if (data.assignedTo !== undefined) patch.assignedTo = _normEmail_(data.assignedTo);
   if (!Object.keys(patch).length) return { updated: false };
+
+  // v6.3 2026-07-18 — when person or date changes (and shiftId wasn't set
+  // explicitly), re-attach to that person's shift on that date, or detach
+  // and report noShift so the UI can warn.
+  let attached = false, noShift = false;
+  if ((data.assignedTo !== undefined || data.date !== undefined) && data.shiftId === undefined) {
+    const row = _readAll_(SHEET_TODOS).find(r => String(r.id) === String(data.id));
+    const email = patch.assignedTo !== undefined ? patch.assignedTo : _normEmail_(row && row.assignedTo);
+    const dstr = patch.date !== undefined ? patch.date : String((row && row.date) || "");
+    const s = _findShiftFor_(email, dstr);
+    patch.shiftId = s ? String(s.eventId) : "";
+    attached = !!s;
+    noShift = !s && !!(email && dstr);
+  }
+
   const matched = _updateWhere_(SHEET_TODOS, "id", String(data.id), patch);
   if (!matched) throw new Error("Task not found: " + data.id);
-  return { updated: true };
+  return { updated: true, attached, noShift };
 }
 
 function api_toggleTodo(data) {
@@ -1831,6 +1874,56 @@ function _releaseTasksForShift_(eventId) {
       String(r.shiftId) === String(eventId) && !_asBool_(r.done));
     rows.forEach(r => _updateWhere_(SHEET_TODOS, "id", String(r.id), { shiftId: "" }));
   } catch (_) {} // never block shift deletion on task cleanup
+}
+
+// ============================================================================
+// v6.4 2026-07-18 — SHIFT TASK ROLLOVER (hourly trigger)
+// A task not finished during its scheduled shift moves to that employee's
+// next upcoming shift; if they have none, it goes back to Up for Grabs
+// (unassigned, no shift, no date) so anyone can take it.
+// ============================================================================
+function _shiftEndTime_(s) {
+  const start = new Date(s.startISO);
+  const end = s.endISO && !_asBool_(s.isOpenEnded) ? new Date(s.endISO) : null;
+  if (end && end > start) return end;
+  // open-ended / missing end: roll after the shift's Central-time day is over
+  const dayEnd = new Date(Utilities.formatDate(start, TZ_CENTRAL, "yyyy-MM-dd") + "T00:00:00" + Utilities.formatDate(start, TZ_CENTRAL, "XXX"));
+  return new Date(dayEnd.getTime() + 86400000);
+}
+
+function rollUnfinishedShiftTasks() {
+  const now = new Date();
+  const todos = _readAll_(SHEET_TODOS).filter(t => !_asBool_(t.done) && t.shiftId);
+  if (!todos.length) return;
+
+  const shifts = _getShiftsCached_();
+  const byId = {};
+  shifts.forEach(s => { byId[String(s.eventId)] = s; });
+  let changed = 0;
+
+  for (const t of todos) {
+    const s = byId[String(t.shiftId)];
+    if (!s || !s.startISO) continue;              // deleted shifts handled by _releaseTasksForShift_
+    if (_shiftEndTime_(s) > now) continue;        // shift not over yet
+
+    const email = _asBool_(s.isOpen) ? "" : _normEmail_(s.staffEmail);
+    const next = email ? shifts
+      .filter(x => !_asBool_(x.isOpen) && _normEmail_(x.staffEmail) === email &&
+        x.startISO && new Date(x.startISO) > now && String(x.eventId) !== String(s.eventId))
+      .sort((a, b) => new Date(a.startISO) - new Date(b.startISO))[0] : null;
+
+    if (next) {
+      _updateWhere_(SHEET_TODOS, "id", String(t.id), {
+        shiftId: String(next.eventId),
+        date: Utilities.formatDate(new Date(next.startISO), TZ_CENTRAL, "yyyy-MM-dd"),
+        assignedTo: email
+      });
+    } else {
+      _updateWhere_(SHEET_TODOS, "id", String(t.id), { shiftId: "", assignedTo: "", date: "" });
+    }
+    changed++;
+  }
+  if (changed) Logger.log("rollUnfinishedShiftTasks: moved " + changed + " task(s)");
 }
 
 // ---------- Task Templates (v6.0) ----------

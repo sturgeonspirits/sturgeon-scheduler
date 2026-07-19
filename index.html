@@ -531,6 +531,7 @@
   let todosByShift = {};
   let todosByDay = {};
   let expandedTasks = new Set();
+  let collapsedTasks = new Set(); // v3.4 2026-07-18 — remembers manual collapse of auto-opened agendas
   let taskEditing = null;
   let tplEditing = null;
 
@@ -1725,11 +1726,12 @@
     const openCount = tasks.filter(t => !t.done).length;
     const doneCount = tasks.length - openCount;
     const taskBadge = `<button class="task-badge ${openCount ? 'has-open' : ''} js-task-badge" data-key="${esc(s.eventId)}">${tasks.length ? `☐ ${openCount}${doneCount ? ` ✓ ${doneCount}` : ''}` : '☐ +'}</button>`;
+    // v3.4 2026-07-18 — the employee's own shift agenda is open by default
     const taskPanel = renderTaskChecklist(String(s.eventId), tasks, {
       shiftId: s.eventId,
       date: s.startISO ? isoDate(new Date(s.startISO)) : '',
       assignedTo: s.isOpen ? '' : (s.staffEmail || '')
-    });
+    }, isMe && !s.isOpen && tasks.some(t => !t.done));
 
     return `
       <div class="shift ${canEdit ? 'js-edit-shift' : ''}" data-eid="${esc(s.eventId)}">
@@ -2575,7 +2577,10 @@
           const date = s.startISO ? isoDate(new Date(s.startISO)) : "";
           if ((t.assignedTo || "") !== email || (t.date || "") !== date) {
             t.assignedTo = email; t.date = date;
-            api("updateTodo", { sessionToken, id: t.id, assignedTo: email, date }).catch(() => {});
+            // v3.3 2026-07-18 — pass shiftId explicitly so the backend keeps
+            // the existing attachment instead of re-resolving (open shifts
+            // have no email and would otherwise detach)
+            api("updateTodo", { sessionToken, id: t.id, assignedTo: email, date, shiftId: t.shiftId }).catch(() => {});
           }
         } else if (t.templateId && !t.shiftId && t.date) {
           const tpl = templatesCache.find(x => x.id === t.templateId);
@@ -2625,8 +2630,9 @@
   // Collapsible checklist panel; must be rendered as the NEXT SIBLING of its
   // toggle's container (.shift or .day-task-strip) — the toggle handler uses
   // nextElementSibling. ctx pre-fills the quick-add's scope.
-  function renderTaskChecklist(key, tasks, ctx) {
-    const open = expandedTasks.has(key);
+  function renderTaskChecklist(key, tasks, ctx, autoOpen) {
+    // v3.4 2026-07-18 — autoOpen shows the employee's shift agenda by default
+    const open = expandedTasks.has(key) || (autoOpen && !collapsedTasks.has(key));
     return `
       <div class="task-list-under" style="display:${open ? 'block' : 'none'}">
         ${tasks.map(t => renderTaskRow(t, { showDate: false, showShift: false })).join("") || '<div class="muted" style="font-size:12px; padding:4px 0;">No tasks yet — add one below.</div>'}
@@ -2656,7 +2662,9 @@
     if (!panel) return;
     const isOpen = panel.style.display !== 'none';
     panel.style.display = isOpen ? 'none' : 'block';
-    if (isOpen) expandedTasks.delete(key); else expandedTasks.add(key);
+    // v3.4 2026-07-18 — track manual collapse so auto-opened agendas stay closed
+    if (isOpen) { expandedTasks.delete(key); collapsedTasks.add(key); }
+    else { expandedTasks.add(key); collapsedTasks.delete(key); }
   }
 
   async function quickAddTask(btn) {
@@ -2816,14 +2824,23 @@
     const btn = document.getElementById("btnAddTodo");
     btn.disabled = true; btn.textContent = "Saving…";
     try {
-      await api("saveTodo", {
+      // v3.3 2026-07-18 — person+date tasks attach to their shift; warn if none
+      const who = document.getElementById("todoWho").value;
+      const dateVal = document.getElementById("todoDate").value;
+      const r = await api("saveTodo", {
         sessionToken, text,
         category: document.getElementById("todoCat").value,
-        assignedTo: document.getElementById("todoWho").value,
-        date: document.getElementById("todoDate").value
+        assignedTo: who,
+        date: dateVal
       });
       textEl.value = "";
-      showToast("Task added!");
+      if (r && r.noShift) {
+        alert("⚠️ " + staffNameFromEmail(who) + " has no shift on " + fmtShortDate(dateVal) + ".\n\nThe task was saved to that day, but it isn't attached to a shift.");
+      } else if (r && r.attached) {
+        showToast("Task added to " + staffNameFromEmail(who) + "'s shift");
+      } else {
+        showToast("Task added!");
+      }
       render(true);
     } catch(e) { handleError(e); }
     finally { btn.disabled = false; btn.textContent = "+ Add"; }
@@ -2886,12 +2903,17 @@
     closeModals();
     showToast("Saving…");
     try {
-      await api("updateTodo", {
-        sessionToken, id,
-        assignedTo: document.getElementById("tWho").value,
-        date: document.getElementById("tDate").value
-      });
-      showToast("Task updated");
+      // v3.3 2026-07-18 — person+date tasks attach to their shift; warn if none
+      const who = document.getElementById("tWho").value;
+      const dateVal = document.getElementById("tDate").value;
+      const r = await api("updateTodo", { sessionToken, id, assignedTo: who, date: dateVal });
+      if (r && r.noShift) {
+        alert("⚠️ " + staffNameFromEmail(who) + " has no shift on " + fmtShortDate(dateVal) + ".\n\nThe task was saved to that day, but it isn't attached to a shift.");
+      } else if (r && r.attached) {
+        showToast("Task added to " + staffNameFromEmail(who) + "'s shift");
+      } else {
+        showToast("Task updated");
+      }
       render(true);
     } catch(e) { handleError(e); }
   };

@@ -29,3 +29,18 @@ top, hours down the left, color-coded shift blocks per duty, overlaps shown
 side-by-side, notes/unavailability/day-tasks in an all-day row, per-day
 shift + hour totals. Managers click a block to edit. Backend v6.2 auto-hides
 swap requests and unavailability entries once their shift/window has ended.
+
+v3.3 2026-07-18 — Person+date tasks attach to shifts:
+Assigning a task to a person and date now attaches it to that person's shift
+that day immediately (shows in their shift card/grid block). If they have no
+shift that day, you get a warning and the task stays on the day instead.
+Changing a task's person/date re-attaches it to the right shift automatically
+(backend v6.3).
+
+v3.4 2026-07-18 — Shift agendas + rollover of unfinished tasks:
+Employees now see their shift agenda expanded by default on their own shift
+cards (collapse sticks per session). Backend v6.4 adds an hourly trigger:
+tasks not checked off during a shift automatically move to that employee's
+next upcoming shift, or back to Up for Grabs (unassigned) if they have no
+future shift. IMPORTANT: after deploying, open the Sheet and run
+Scheduler > Install Triggers once so the new hourly rollover trigger exists.
