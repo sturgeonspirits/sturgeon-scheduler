@@ -211,6 +211,28 @@
     .tpl-days { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
     .tpl-days label { display:flex; align-items:center; gap:4px; font-size:12px; font-weight:700; border:1px solid var(--border); border-radius:8px; padding:8px 10px; margin:0; min-height:38px; }
     .tpl-days input { width:auto; margin:0; }
+
+    /* v3.2 2026-07-18 — Weekly staffing grid (desktop-optimized) */
+    .sgrid-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; border:1px solid var(--border); border-radius:12px; background:#fff; }
+    .sgrid { display:grid; min-width:1000px; position:relative; }
+    .sgrid-head { position:sticky; top:0; z-index:5; background:#fff; border-bottom:2px solid var(--border); display:flex; flex-direction:column; justify-content:center; padding:8px 6px; text-align:center; }
+    .sgrid-head .d-name { font-weight:800; font-size:13px; }
+    .sgrid-head .d-date { font-size:11px; color:var(--muted); font-weight:600; }
+    .sgrid-head .d-stats { font-size:10px; color:var(--muted); margin-top:2px; }
+    .sgrid-head.today { color:var(--primary); box-shadow:inset 0 -3px 0 var(--accent); }
+    .sgrid-gutter { font-size:10px; font-weight:700; color:var(--muted); text-align:right; padding-right:6px; border-right:1px solid var(--border); background:#fff; position:sticky; left:0; z-index:4; }
+    .sgrid-allday { border-right:1px solid var(--border); border-bottom:1px solid var(--border); background:var(--bg); padding:4px; font-size:11px; min-height:30px; }
+    .sgrid-col { position:relative; border-right:1px solid var(--border); background:
+      repeating-linear-gradient(to bottom, transparent 0, transparent 47px, var(--border) 47px, var(--border) 48px); }
+    .sgrid-col.today { background-color:rgba(201,162,74,0.05); }
+    .sgrid-hourlbl { height:48px; line-height:1; padding-top:2px; }
+    .sgrid-blk { position:absolute; border-radius:6px; padding:3px 5px; font-size:11px; line-height:1.25; overflow:hidden;
+      border:1px solid rgba(0,0,0,0.15); color:#fff; cursor:pointer; box-sizing:border-box; }
+    .sgrid-blk .b-who { font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .sgrid-blk .b-sub { font-size:10px; opacity:0.9; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .sgrid-blk.open { background:repeating-linear-gradient(45deg, #8a6d1f, #8a6d1f 6px, #a3832a 6px, #a3832a 12px) !important; border-style:dashed; }
+    .sgrid-blk.openended { border-bottom:2px dashed rgba(255,255,255,0.8); }
+    .sgrid-note { background:#fff; border:1px dashed var(--accent); color:var(--text); border-radius:6px; padding:2px 5px; margin-bottom:2px; font-size:10px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   </style>
 </head>
 <body>
@@ -902,9 +924,10 @@
   // Schedule
   async function renderSchedule(el, rv) {
     const mode = subTabs.schedule;
+    // v3.2 2026-07-18 — grid mode reuses the week fetch/cache
     const dashData = await api("dashSchedule", {
       sessionToken,
-      mode,
+      mode: mode === 'month' ? 'month' : 'week',
       weekStartISO: weekStart.toISOString(),
       monthISO: localMonthISO(monthAnchor)
     }, { cache: true });
@@ -948,6 +971,7 @@
         <div class="segmented" style="margin-bottom:0; flex:1; min-width:200px;">
           <button class="seg-btn ${mode==='week'?'active':''}" onclick="setSub('schedule','week')">Week View</button>
           <button class="seg-btn ${mode==='month'?'active':''}" onclick="setSub('schedule','month')">Month View</button>
+          <button class="seg-btn ${mode==='grid'?'active':''}" onclick="setSub('schedule','grid')">Staffing Grid</button><!-- v3.2 2026-07-18 -->
         </div>
         <div style="display:flex; align-items:center; gap:8px; background:var(--card); padding:6px 12px; border-radius:10px; border:1px solid var(--border);">
           <span style="font-size:12px; font-weight:700; color:var(--text)">My Shifts Only</span>
@@ -956,7 +980,7 @@
       </div>
     `;
 
-    const label = mode==='week'
+    const label = mode!=='month'
       ? `${fmtDate(weekStart)} – ${fmtDate(addDays(weekStart,6))}`
       : monthAnchor.toLocaleDateString(undefined, {month:'long', year:'numeric'});
 
@@ -979,7 +1003,10 @@
       </div>
     `;
 
-    if (mode === 'week') {
+    if (mode === 'grid') {
+      // v3.2 2026-07-18 — desktop weekly staffing grid
+      html += renderStaffingGrid(activeSwaps);
+    } else if (mode === 'week') {
       const days = [0,1,2,3,4,5,6].map(i => addDays(weekStart, i));
       const dayCards = [];
       for (const d of days) {
@@ -1086,6 +1113,152 @@
     }
 
     el.innerHTML = html;
+  }
+
+  // ==========================================================================
+  // v3.2 2026-07-18 — Weekly staffing grid: days across top, hours down the
+  // left, positioned shift blocks (overlaps side-by-side). Desktop-optimized.
+  // ==========================================================================
+  const GRID_HOUR_PX = 48;
+  const GRID_TASK_COLORS = {
+    "Bartender":"#0B1F3B", "Bar back":"#3A5A8C", "Server":"#C9A24A",
+    "On-call":"#5A6573", "Production":"#2E7D32", "Marketing":"#8E44AD", "Distribution":"#B3541E"
+  };
+  function gridTaskColor(task) {
+    if (GRID_TASK_COLORS[task]) return GRID_TASK_COLORS[task];
+    let h = 0; for (const c of String(task||"")) h = (h * 31 + c.charCodeAt(0)) % 360;
+    return `hsl(${h}, 45%, 40%)`;
+  }
+
+  function renderStaffingGrid(activeSwaps) {
+    const days = [0,1,2,3,4,5,6].map(i => addDays(weekStart, i));
+    const dayIsos = days.map(isoDate);
+    const swapEids = new Set(activeSwaps.map(s => String(s.eventId)));
+    const myEmail = bootstrap.me.email, myName = bootstrap.me.name;
+
+    // Split real shifts from all-day items (notes, unavailability)
+    let shifts = globalShifts.filter(s => s.startISO && !String(s.eventId).startsWith("NOTE_") && !s.isUnavail);
+    const notes = globalShifts.filter(s => String(s.eventId).startsWith("NOTE_"));
+    const unavails = globalShifts.filter(s => s.isUnavail);
+    if (filterMyShifts) shifts = shifts.filter(s => s.staffEmail === myEmail || s.staffName === myName);
+
+    // Build day-clipped segments (overnight shifts show on both days)
+    const segsByDay = {}; dayIsos.forEach(iso => segsByDay[iso] = []);
+    for (const s of shifts) {
+      const start = new Date(s.startISO);
+      let end = s.endISO && !s.isOpenEnded ? new Date(s.endISO) : null;
+      const openEnded = !end || end <= start;
+      if (openEnded) end = new Date(start.getTime() + 4 * 3600000); // display length only
+      let cur = new Date(start);
+      while (cur < end) {
+        const dayStart = new Date(cur); dayStart.setHours(0,0,0,0);
+        const dayEnd = new Date(dayStart.getTime() + 86400000);
+        const segEnd = end < dayEnd ? end : dayEnd;
+        const iso = isoDate(cur);
+        if (segsByDay[iso]) segsByDay[iso].push({
+          s, openEnded,
+          startMin: (cur - dayStart) / 60000,
+          endMin: (segEnd - dayStart) / 60000,
+          continues: segEnd < end, continued: cur > start
+        });
+        cur = segEnd;
+      }
+    }
+
+    // Hour range: fit the data, default 8 AM – 11 PM
+    let minH = 8, maxH = 23;
+    for (const iso of dayIsos) for (const g of segsByDay[iso]) {
+      minH = Math.min(minH, Math.floor(g.startMin / 60));
+      maxH = Math.max(maxH, Math.ceil(g.endMin / 60));
+    }
+    const totalPx = (maxH - minH) * GRID_HOUR_PX;
+
+    // Side-by-side layout for overlapping segments (cluster + column assignment)
+    function layoutDay(segs) {
+      segs.sort((a,b) => a.startMin - b.startMin || b.endMin - a.endMin);
+      let cluster = [], colEnds = [], clusterMax = -1;
+      const flush = () => { cluster.forEach(g => g.cols = colEnds.length); cluster = []; colEnds = []; };
+      for (const g of segs) {
+        if (cluster.length && g.startMin >= clusterMax) flush();
+        let col = colEnds.findIndex(e => e <= g.startMin);
+        if (col === -1) { col = colEnds.length; colEnds.push(0); }
+        colEnds[col] = g.endMin;
+        g.col = col;
+        cluster.push(g);
+        clusterMax = Math.max(clusterMax, g.endMin);
+      }
+      flush();
+    }
+
+    const canEdit = bootstrap.me.isManager;
+    const todayIso = isoDate(new Date());
+    const hourLbls = [];
+    for (let h = minH; h < maxH; h++) {
+      const lbl = new Date(2000,0,1,h).toLocaleTimeString(undefined,{hour:'numeric'});
+      hourLbls.push(`<div class="sgrid-hourlbl">${esc(lbl)}</div>`);
+    }
+
+    let heads = `<div class="sgrid-head"></div>`;
+    let alldays = `<div class="sgrid-gutter sgrid-allday" style="border-right:1px solid var(--border)"></div>`;
+    let cols = "";
+
+    days.forEach((d, i) => {
+      const iso = dayIsos[i];
+      const segs = segsByDay[iso];
+      layoutDay(segs);
+      const isToday = iso === todayIso;
+      const nShifts = new Set(segs.filter(g => !g.continued).map(g => g.s.eventId)).size;
+      const hours = segs.reduce((t,g) => t + (g.openEnded ? 0 : (g.endMin - g.startMin)), 0) / 60;
+
+      heads += `<div class="sgrid-head ${isToday?'today':''}">
+        <div class="d-name">${esc(d.toLocaleDateString(undefined,{weekday:'short'}))}</div>
+        <div class="d-date">${esc(d.toLocaleDateString(undefined,{month:'short',day:'numeric'}))}</div>
+        <div class="d-stats">${nShifts ? `${nShifts} shift${nShifts===1?'':'s'} · ${hours % 1 ? hours.toFixed(1) : hours}h${segs.some(g=>g.openEnded)?'+':''}` : '—'}</div>
+      </div>`;
+
+      const dayNotes = notes.filter(n => n.startISO && isoDate(new Date(n.startISO)) === iso)
+        .map(n => `<div class="sgrid-note" title="${esc(n.task)}">📌 ${esc(n.task)}</div>`).join("");
+      const dayUnavail = unavails.filter(u => u.startISO && isoDate(new Date(u.startISO)) === iso)
+        .map(u => `<div class="sgrid-note" style="border-color:var(--muted); color:var(--muted)" title="Unavailable">🚫 ${esc(u.staffName || u.staffEmail || 'Someone')} off</div>`).join("");
+      alldays += `<div class="sgrid-allday">${dayNotes}${dayUnavail}${dayTasksStrip(iso)}</div>`;
+
+      const blocks = segs.map(g => {
+        const s = g.s;
+        const top = ((g.startMin - minH * 60) / 60) * GRID_HOUR_PX;
+        const height = Math.max(((g.endMin - g.startMin) / 60) * GRID_HOUR_PX - 2, 22);
+        const w = 100 / g.cols;
+        const who = s.isOpen ? "OPEN" : esc(s.staffName || s.staffEmail || "?");
+        const tasks = todosByShift[s.eventId] || [];
+        const tOpen = tasks.filter(t => !t.done).length;
+        const timeStr = fmtShiftTime(s);
+        const bits = [timeStr, s.task, s.location].filter(Boolean).join(" · ");
+        const marks = `${swapEids.has(String(s.eventId)) ? ' ⇄' : ''}${tOpen ? ` ☐${tOpen}` : ''}${g.continues ? ' ↷' : ''}${g.continued ? ' ↶' : ''}`;
+        return `<div class="sgrid-blk ${s.isOpen?'open':''} ${g.openEnded?'openended':''} ${canEdit?'js-edit-shift':''}"
+          data-eid="${esc(s.eventId)}"
+          style="top:${top}px; height:${height}px; left:${(g.col*w).toFixed(2)}%; width:calc(${w.toFixed(2)}% - 3px); background:${gridTaskColor(s.task)}"
+          title="${who} — ${esc(bits)}${s.isOpen?' (open shift)':''}${g.openEnded?' (until needed)':''}">
+          <div class="b-who">${who}${marks}</div>
+          <div class="b-sub">${esc(bits)}</div>
+        </div>`;
+      }).join("");
+
+      cols += `<div class="sgrid-col ${isToday?'today':''}" style="height:${totalPx}px">${blocks}</div>`;
+    });
+
+    const legend = [...new Set(shifts.map(s => s.task).filter(Boolean))].map(t =>
+      `<span style="display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:700; margin-right:12px;">
+        <span style="width:10px; height:10px; border-radius:3px; background:${gridTaskColor(t)}"></span>${esc(t)}</span>`).join("");
+
+    return `
+      <div class="sgrid-wrap">
+        <div class="sgrid" style="grid-template-columns:52px repeat(7, 1fr);">
+          ${heads}
+          ${alldays}
+          <div class="sgrid-gutter" style="height:${totalPx}px">${hourLbls.join("")}</div>
+          ${cols}
+        </div>
+      </div>
+      ${legend ? `<div style="margin-top:10px; padding:0 4px;">${legend}</div>` : ''}`;
   }
 
   // Open shifts
@@ -1296,6 +1469,13 @@
         </div>
 
         <div style="margin-top:16px; text-align:right"><button class="btn primary small" onclick="savePrefs(this)">Save</button></div>
+      </div>
+
+      <!-- v6.1 2026-07-18 — Personal calendar feed (ICS) -->
+      <div class="card">
+        <div class="h2">Calendar Feed</div>
+        <div class="muted" style="margin-bottom:10px">Subscribe in Google, Zoho, or Apple Calendar to see your shifts automatically.</div>
+        <div id="icsBox"><button class="btn small" onclick="loadIcsUrl(this)">Get My Feed Link</button></div>
       </div>
     `;
 
@@ -1639,7 +1819,7 @@
   function setSub(tab, val) { subTabs[tab] = val; showViewLoading(); render(); }
 
   function moveDate(dir) {
-    const isWeekMode = (activeTab === 'schedule' && subTabs.schedule === 'week')
+    const isWeekMode = (activeTab === 'schedule' && subTabs.schedule !== 'month') /* v3.2 2026-07-18 grid moves by week */
       || (activeTab === 'admin' && subTabs.admin === 'summary' && subTabs.summary === 'week');
 
     if (isWeekMode) weekStart = addDays(weekStart, dir * 7);
@@ -1674,6 +1854,24 @@
       showToast("Preferences Saved");
     } catch(e) { handleError(e); }
     finally { if(btn) btn.disabled = false; }
+  }
+
+  // v6.1 2026-07-18 — Fetch + display personal ICS feed URL
+  async function loadIcsUrl(btn) {
+    if(btn) btn.disabled = true;
+    try {
+      const r = await api("getIcsUrl", { sessionToken });
+      const box = document.getElementById("icsBox");
+      box.innerHTML = `
+        <input type="text" readonly value="${esc(r.url)}" id="icsUrl" style="width:100%; margin-bottom:8px" onclick="this.select()">
+        <button class="btn primary small" onclick="copyIcsUrl(this)">Copy Link</button>`;
+    } catch(e) { handleError(e); if(btn) btn.disabled = false; }
+  }
+
+  function copyIcsUrl(btn) {
+    const inp = document.getElementById("icsUrl");
+    inp.select();
+    navigator.clipboard.writeText(inp.value).then(() => showToast("Link Copied"));
   }
 
   async function claimShift(id, btn) {

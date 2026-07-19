@@ -1,5 +1,7 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v6.2 — Auto-hide past swap requests & unavailability (2026-07-18)
+ * v6.1 — Per-person ICS calendar feeds (2026-07-18)
  * v6.0 — Task assignment: shift/day/person tasks, recurring TaskTemplates,
  *        proof values, auto-materialization (2026-07-18)
  * v5.8 — Auto-cancel stale swap requests on direct reassign/delete (2026-06-30)
@@ -92,7 +94,91 @@ function doPost(e) {
   }
 }
 
-function doGet() { return HtmlService.createHtmlOutput("Scheduler API Online."); }
+// v6.1 2026-07-18 — Per-person ICS calendar feed (?ics=1&email=...&token=...)
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  if (p.ics) {
+    try {
+      const email = _normEmail_(p.email || "");
+      if (!email || String(p.token || "") !== _icsToken_(email)) {
+        return ContentService.createTextOutput("Invalid feed link.").setMimeType(ContentService.MimeType.TEXT);
+      }
+      return ContentService.createTextOutput(_buildIcs_(email)).setMimeType(ContentService.MimeType.ICAL);
+    } catch (err) {
+      return ContentService.createTextOutput("Feed error: " + String(err.message || err)).setMimeType(ContentService.MimeType.TEXT);
+    }
+  }
+  return HtmlService.createHtmlOutput("Scheduler API Online.");
+}
+
+// ============================================================================
+// ICS FEED HELPERS (v6.1 2026-07-18)
+// ============================================================================
+
+/** Stable per-person token: HMAC-SHA256(email, API_KEY), first 20 hex chars. */
+function _icsToken_(email) {
+  const sig = Utilities.computeHmacSha256Signature(_normEmail_(email), API_KEY);
+  return sig.map(b => ((b + 256) % 256).toString(16).padStart(2, "0")).join("").slice(0, 20);
+}
+
+function _icsUrlFor_(email) {
+  const base = ScriptApp.getService().getUrl();
+  return base + "?ics=1&email=" + encodeURIComponent(_normEmail_(email)) + "&token=" + _icsToken_(email);
+}
+
+function _icsEscape_(s) {
+  return String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+}
+
+function _icsDate_(isoStr) {
+  return Utilities.formatDate(new Date(isoStr), "UTC", "yyyyMMdd'T'HHmmss'Z'");
+}
+
+/** Builds an ICS calendar of one person's shifts (last 30 days + all future). */
+function _buildIcs_(email) {
+  const cutoff = new Date(Date.now() - 30 * 86400000);
+  const shifts = _getShiftsCached_().filter(s =>
+    _normEmail_(s.staffEmail) === email &&
+    !_asBool_(s.isOpen) &&
+    s.startISO && s.endISO &&
+    new Date(s.endISO) > cutoff
+  );
+  const now = _icsDate_(new Date().toISOString());
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Sturgeon Spirits//Scheduler//EN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    "X-WR-CALNAME:" + _icsEscape_("Sturgeon Spirits — My Shifts"),
+    "X-WR-TIMEZONE:" + TZ_CENTRAL
+  ];
+  shifts.forEach(s => {
+    lines.push("BEGIN:VEVENT");
+    lines.push("UID:" + _icsEscape_(s.eventId || (s.startISO + email)) + "@sturgeon-scheduler");
+    lines.push("DTSTAMP:" + now);
+    lines.push("DTSTART:" + _icsDate_(s.startISO));
+    lines.push("DTEND:" + _icsDate_(s.endISO));
+    lines.push("SUMMARY:" + _icsEscape_(s.task || "Shift"));
+    if (s.location) lines.push("LOCATION:" + _icsEscape_(s.location));
+    if (s.notes) lines.push("DESCRIPTION:" + _icsEscape_(s.notes));
+    lines.push("URL:" + SITE_URL);
+    lines.push("END:VEVENT");
+  });
+  lines.push("END:VCALENDAR");
+  return lines.join("\r\n");
+}
+
+/** Returns the signed-in user's personal feed URL (v6.1 2026-07-18). */
+function api_getIcsUrl(data) {
+  const me = _requireSession_(data.sessionToken);
+  return { url: _icsUrlFor_(me.email) };
+}
+
+/** Manager utility: run from the Apps Script editor to log every staff feed URL. */
+function printAllIcsUrls() {
+  _staffIndex_().forEach(s => Logger.log(s.name + " <" + s.email + ">: " + _icsUrlFor_(s.email)));
+}
 
 // ============================================================================
 // 2. SETUP & TRIGGERS
@@ -211,6 +297,7 @@ function _route_(action, data) {
     case "acceptSwap":       return api_acceptSwap(data);
     case "approveSwap":      return api_approveSwap(data);
     case "setReminderPrefs": return api_setReminderPrefs(data);
+    case "getIcsUrl":        return api_getIcsUrl(data); // v6.1 2026-07-18
     case "addUnavailability":     return api_addUnavailability(data);
     case "listMyUnavailability":  return api_listMyUnavailability(data);
     case "listAllUnavailability": return api_listAllUnavailability(data);
@@ -287,16 +374,26 @@ function api_dashboardSchedule(data) {
     bulletin = { message: row.message || "", updatedBy: row.updatedBy || "" };
   }
 
-  // Swaps
-  const swapItems = me.isManager
-    ? _readAll_(SHEET_SWAP)
-    : _readAll_(SHEET_SWAP).filter(r =>
-        _normEmail_(r.fromEmail) === me.email ||
-        _normEmail_(r.toEmail) === me.email ||
-        (r.toEmail === '__anyone__' && r.status === 'REQUESTED')
-      );
+  // Swaps (v6.2 2026-07-18 — past swaps auto-hidden)
+  const swapItems = _visibleSwaps_(me);
 
   return { shifts: schedResult.shifts, buckets: schedResult.buckets || null, bulletin, swaps: swapItems };
+}
+
+// v6.2 2026-07-18 — shared swap visibility: role/ownership filter + hide swaps
+// whose shift has already ended (untimed swaps are kept).
+function _swapIsPast_(r) {
+  const ref = r.endISO || r.startISO;
+  return !!ref && new Date(ref) < new Date();
+}
+function _visibleSwaps_(me) {
+  const rows = _readAll_(SHEET_SWAP).filter(r => !_swapIsPast_(r));
+  if (me.isManager) return rows;
+  return rows.filter(r =>
+    _normEmail_(r.fromEmail) === me.email ||
+    _normEmail_(r.toEmail) === me.email ||
+    (r.toEmail === '__anyone__' && r.status === 'REQUESTED')
+  );
 }
 
 function api_dashboardOpen(data) {
@@ -308,13 +405,7 @@ function api_dashboardOpen(data) {
     .map(r => _cleanShift_(r, me.isManager))
     .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
 
-  const swapItems = me.isManager
-    ? _readAll_(SHEET_SWAP)
-    : _readAll_(SHEET_SWAP).filter(r =>
-        _normEmail_(r.fromEmail) === me.email ||
-        _normEmail_(r.toEmail) === me.email ||
-        (r.toEmail === '__anyone__' && r.status === 'REQUESTED')
-      );
+  const swapItems = _visibleSwaps_(me); // v6.2 2026-07-18 — past swaps auto-hidden
 
   return { openShifts: openShifts, swaps: swapItems };
 }
@@ -322,14 +413,8 @@ function api_dashboardOpen(data) {
 function api_dashboardRequests(data) {
   const me = _requireSession_(data.sessionToken);
 
-  // Swaps
-  const swapItems = me.isManager
-    ? _readAll_(SHEET_SWAP)
-    : _readAll_(SHEET_SWAP).filter(r =>
-        _normEmail_(r.fromEmail) === me.email ||
-        _normEmail_(r.toEmail) === me.email ||
-        (r.toEmail === '__anyone__' && r.status === 'REQUESTED')
-      );
+  // Swaps (v6.2 2026-07-18 — past swaps auto-hidden)
+  const swapItems = _visibleSwaps_(me);
 
   // Two months of shifts
   const now = new Date();
@@ -350,8 +435,8 @@ function api_dashboardRequests(data) {
     else { if (!nextBuckets[k]) nextBuckets[k] = []; nextBuckets[k].push(s); }
   });
 
-  // Unavailability
-  const cutoff = new Date(now.getTime() - 7 * 24 * 3600000);
+  // Unavailability (v6.2 2026-07-18 — hide as soon as it ends, was 7-day grace)
+  const cutoff = now;
   const uaItems = _readAll_(SHEET_AVAIL)
     .filter(r => _normEmail_(r.staffEmail) === me.email && new Date(r.endISO) > cutoff)
     .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
@@ -1060,19 +1145,15 @@ function api_requestSwap(data) {
 
 function api_listMySwaps(data) {
   const me = _requireSession_(data.sessionToken);
-  return {
-    items: _readAll_(SHEET_SWAP).filter(r =>
-      _normEmail_(r.fromEmail) === me.email ||
-      _normEmail_(r.toEmail) === me.email ||
-      (r.toEmail === '__anyone__' && r.status === 'REQUESTED')
-    )
-  };
+  // v6.2 2026-07-18 — past swaps auto-hidden
+  return { items: _visibleSwaps_(me) };
 }
 
 function api_listSwaps(data) {
   const me = _requireSession_(data.sessionToken);
   if (!me.isManager) throw new Error("Managers only");
-  return { items: _readAll_(SHEET_SWAP) };
+  // v6.2 2026-07-18 — past swaps auto-hidden
+  return { items: _readAll_(SHEET_SWAP).filter(r => !_swapIsPast_(r)) };
 }
 
 function api_acceptSwap(data) {
@@ -1167,7 +1248,7 @@ function api_addUnavailability(data) {
 
 function api_listMyUnavailability(data) {
   const me = _requireSession_(data.sessionToken);
-  const cutoff = new Date(new Date().getTime() - 7 * 24 * 3600000);
+  const cutoff = new Date(); // v6.2 2026-07-18 — hide as soon as it ends (was 7-day grace)
 
   const rows = _readAll_(SHEET_AVAIL)
     .filter(r => _normEmail_(r.staffEmail) === me.email && new Date(r.endISO) > cutoff)
@@ -1180,7 +1261,7 @@ function api_listAllUnavailability(data) {
   const me = _requireSession_(data.sessionToken);
   if (!me.isManager) throw new Error("Managers only");
 
-  const cutoff = new Date(new Date().getTime() - 24 * 60 * 60 * 1000);
+  const cutoff = new Date(); // v6.2 2026-07-18 — hide as soon as it ends (was 24h grace)
   const rows = _readAll_(SHEET_AVAIL)
     .filter(r => new Date(r.endISO) > cutoff)
     .sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
