@@ -44,3 +44,9 @@ tasks not checked off during a shift automatically move to that employee's
 next upcoming shift, or back to Up for Grabs (unassigned) if they have no
 future shift. IMPORTANT: after deploying, open the Sheet and run
 Scheduler > Install Triggers once so the new hourly rollover trigger exists.
+
+v3.5 2026-07-19 — Full employee agenda on shifts:
+Clicking a shift now also shows tasks assigned to that employee (same day or
+undated) that aren't attached to the shift, with a one-tap Attach button.
+Shift cards and staffing-grid blocks include these in their task counts and
+checklists, so a shift shows the employee's complete workload. Frontend only.

@@ -1229,8 +1229,9 @@
         const height = Math.max(((g.endMin - g.startMin) / 60) * GRID_HOUR_PX - 2, 22);
         const w = 100 / g.cols;
         const who = s.isOpen ? "OPEN" : esc(s.staffName || s.staffEmail || "?");
-        const tasks = todosByShift[s.eventId] || [];
-        const tOpen = tasks.filter(t => !t.done).length;
+        // v3.5 2026-07-19 — count includes tasks assigned to the employee, not just shift-attached
+        const agenda = shiftAgendaTasks(s);
+        const tOpen = agenda.attached.filter(t => !t.done).length + agenda.assigned.length;
         const timeStr = fmtShiftTime(s);
         const bits = [timeStr, s.task, s.location].filter(Boolean).join(" · ");
         const marks = `${swapEids.has(String(s.eventId)) ? ' ⇄' : ''}${tOpen ? ` ☐${tOpen}` : ''}${g.continues ? ' ↷' : ''}${g.continued ? ' ↶' : ''}`;
@@ -1722,7 +1723,9 @@
     const isMe = name === bootstrap.me.name || name === bootstrap.me.email;
 
     // v3 2026-07-18 — task badge + inline checklist under the shift card
-    const tasks = todosByShift[s.eventId] || [];
+    // v3.5 2026-07-19 — includes tasks assigned to the employee (day or undated)
+    const agendaAll = shiftAgendaTasks(s);
+    const tasks = [...agendaAll.attached, ...agendaAll.assigned];
     const openCount = tasks.filter(t => !t.done).length;
     const doneCount = tasks.length - openCount;
     const taskBadge = `<button class="task-badge ${openCount ? 'has-open' : ''} js-task-badge" data-key="${esc(s.eventId)}">${tasks.length ? `☐ ${openCount}${doneCount ? ` ✓ ${doneCount}` : ''}` : '☐ +'}</button>`;
@@ -2562,6 +2565,21 @@
     }
   }
 
+  // v3.5 2026-07-19 — everything on a shift's agenda: tasks attached to the
+  // shift PLUS tasks assigned to that employee (dated that day or undated)
+  // that aren't attached to any shift. Used by shift cards, the shift modal,
+  // and the staffing grid so the employee's full workload is visible.
+  function shiftAgendaTasks(s) {
+    const attached = todosByShift[s.eventId] || [];
+    const email = !s.isOpen ? String(s.staffEmail || '').toLowerCase() : '';
+    if (!email) return { attached, assigned: [] };
+    const iso = s.startISO ? isoDate(new Date(s.startISO)) : '';
+    const assigned = todosCache.filter(t => !t.done && !t.shiftId &&
+      String(t.assignedTo || '').toLowerCase() === email &&
+      (!t.date || t.date === iso));
+    return { attached, assigned };
+  }
+
   // Keep shift tasks consistent with whoever currently holds the shift
   // (survives swaps/reassignment), and attach duty-targeted template tasks
   // to their matching shift. Fire-and-forget; local state fixed immediately.
@@ -2938,12 +2956,26 @@
     }
     editRows.style.display = "block";
     hint.textContent = "";
-    const tasks = todosByShift[eid] || [];
-    listEl.innerHTML = tasks.length ? tasks.map(t => `
+    // v3.5 2026-07-19 — also show tasks assigned to the employee that aren't
+    // attached to this shift, with a one-tap Attach
+    const shift = globalShifts.find(x => x.eventId === eid) || {};
+    const agenda = shiftAgendaTasks(shift.eventId ? shift : { eventId: eid, isOpen: true });
+    const tasks = agenda.attached;
+    let html = tasks.length ? tasks.map(t => `
       <div class="row" style="justify-content:space-between; padding:6px 0; border-bottom:1px solid #eee; flex-wrap:nowrap;">
         <div style="font-size:13px; flex:1; min-width:0; ${t.done ? 'text-decoration:line-through; color:var(--muted);' : ''}">${esc(t.text)}</div>
         <button class="btn small danger" type="button" style="flex:none;" onclick="detachShiftTask('${esc(t.id)}')">✕</button>
       </div>`).join("") : '<div class="muted" style="font-size:12px; padding:2px 0 6px;">No tasks on this shift.</div>';
+    if (agenda.assigned.length) {
+      const who = staffNameFromEmail(shift.staffEmail || '');
+      html += `<div class="muted" style="font-size:11px; font-weight:700; margin-top:8px;">Also assigned to ${esc(who)}:</div>` +
+        agenda.assigned.map(t => `
+        <div class="row" style="justify-content:space-between; padding:6px 0; border-bottom:1px solid #eee; flex-wrap:nowrap;">
+          <div style="font-size:13px; flex:1; min-width:0;">${esc(t.text)}${t.date ? ` <span class="muted" style="font-size:11px">· ${esc(fmtShortDate(t.date))}</span>` : ' <span class="muted" style="font-size:11px">· anytime</span>'}</div>
+          <button class="btn small accent" type="button" style="flex:none;" onclick="attachAssignedTask('${esc(t.id)}')">Attach</button>
+        </div>`).join("");
+    }
+    listEl.innerHTML = html;
     const backlog = todosCache.filter(t => !t.done && !t.shiftId && !t.assignedTo);
     document.getElementById("fTaskAttach").innerHTML =
       '<option value="">Attach from task list…</option>' +
@@ -2983,6 +3015,22 @@
     try {
       await api("updateTodo", {
         sessionToken, id: sel.value,
+        shiftId: editing,
+        date: s && s.startISO ? isoDate(new Date(s.startISO)) : "",
+        assignedTo: s && !s.isOpen ? (s.staffEmail || "") : ""
+      });
+      showToast("Task attached");
+      await refreshShiftModalTasks();
+    } catch(e) { handleError(e); }
+  };
+
+  // v3.5 2026-07-19 — pull an employee-assigned task onto this shift
+  window.attachAssignedTask = async function(id) {
+    if (!editing) return;
+    const s = globalShifts.find(x => x.eventId === editing);
+    try {
+      await api("updateTodo", {
+        sessionToken, id,
         shiftId: editing,
         date: s && s.startISO ? isoDate(new Date(s.startISO)) : "",
         assignedTo: s && !s.isOpen ? (s.staffEmail || "") : ""
