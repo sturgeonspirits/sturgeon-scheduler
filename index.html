@@ -1734,7 +1734,8 @@
       shiftId: s.eventId,
       date: s.startISO ? isoDate(new Date(s.startISO)) : '',
       assignedTo: s.isOpen ? '' : (s.staffEmail || '')
-    }, isMe && !s.isOpen && tasks.some(t => !t.done));
+    // v3.6 2026-07-19 — staff always see their own shift checklist expanded
+    }, isMe && !s.isOpen && tasks.length > 0);
 
     return `
       <div class="shift ${canEdit ? 'js-edit-shift' : ''}" data-eid="${esc(s.eventId)}">
@@ -2196,7 +2197,10 @@
     document.getElementById("fRecurBox").style.display = "none";
 
     // v3 2026-07-18 — shift task checklist in the modal
+    // v3.6 2026-07-19 — render from current data, then pull fresh from the
+    // server so tasks added moments ago always appear on reopen
     renderShiftModalTasks(eid);
+    if (eid) refreshShiftModalTasks().catch(() => {});
   }
 
   window.toggleOpenEnded = function() {
@@ -2548,14 +2552,19 @@
     } catch(_) { templatesCache = []; }
   }
 
+  // v3.6 2026-07-19 — IDs from the sheet can come back with stray whitespace or
+  // as non-strings; normalize on both sides so task↔shift matching never misses.
+  function normId(v) { return String(v == null ? '' : v).trim(); }
+
   function buildTaskMaps() {
     todosByShift = {};
     todosByDay = {};
     const today = isoDate(new Date());
     for (const t of todosCache) {
-      if (t.shiftId) {
-        if (!todosByShift[t.shiftId]) todosByShift[t.shiftId] = [];
-        todosByShift[t.shiftId].push(t);
+      if (normId(t.shiftId)) {
+        const k = normId(t.shiftId);
+        if (!todosByShift[k]) todosByShift[k] = [];
+        todosByShift[k].push(t);
       } else if (t.date) {
         // auto-roll: undone dated tasks are due today, not lost in the past
         const d = (!t.done && t.date < today) ? today : t.date;
@@ -2569,14 +2578,26 @@
   // shift PLUS tasks assigned to that employee (dated that day or undated)
   // that aren't attached to any shift. Used by shift cards, the shift modal,
   // and the staffing grid so the employee's full workload is visible.
+  // v3.6 2026-07-19 — matched directly against todosCache (not the map) so a
+  // stale/mis-keyed map can never hide a task. "assigned" = anything else on
+  // that employee's plate for the day (or undated), including tasks whose
+  // shiftId points at a shift that no longer exists.
   function shiftAgendaTasks(s) {
-    const attached = todosByShift[s.eventId] || [];
-    const email = !s.isOpen ? String(s.staffEmail || '').toLowerCase() : '';
-    if (!email) return { attached, assigned: [] };
+    const eid = normId(s.eventId);
+    const email = !s.isOpen ? String(s.staffEmail || '').trim().toLowerCase() : '';
     const iso = s.startISO ? isoDate(new Date(s.startISO)) : '';
-    const assigned = todosCache.filter(t => !t.done && !t.shiftId &&
-      String(t.assignedTo || '').toLowerCase() === email &&
-      (!t.date || t.date === iso));
+    const liveShiftIds = new Set(globalShifts.map(x => normId(x.eventId)));
+
+    const attached = todosCache.filter(t => normId(t.shiftId) === eid);
+    if (!email) return { attached, assigned: [] };
+
+    const assigned = todosCache.filter(t => {
+      if (t.done || normId(t.shiftId) === eid) return false;
+      if (String(t.assignedTo || '').trim().toLowerCase() !== email) return false;
+      // on another *existing* shift → belongs to that shift, not this one
+      if (normId(t.shiftId) && liveShiftIds.has(normId(t.shiftId))) return false;
+      return !t.date || t.date === iso;
+    });
     return { attached, assigned };
   }
 

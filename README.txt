@@ -50,3 +50,12 @@ Clicking a shift now also shows tasks assigned to that employee (same day or
 undated) that aren't attached to the shift, with a one-tap Attach button.
 Shift cards and staffing-grid blocks include these in their task counts and
 checklists, so a shift shows the employee's complete workload. Frontend only.
+
+v3.6 2026-07-19 — Reliable task↔shift matching + staff shift checklist:
+Tasks are now matched to shifts directly against the task list with normalized
+IDs, so a stale or mis-keyed lookup can't hide them (this fixes tasks added in
+the shift modal not appearing on reopen or in the staffing grid). Reopening a
+shift also pulls fresh task data from the server. Tasks whose shift no longer
+exists are rescued onto the employee's shift for that day. Staff see every
+task assigned to them for a shift as a checklist, expanded by default on their
+own shift cards, and can tick items off inline. Frontend only.
