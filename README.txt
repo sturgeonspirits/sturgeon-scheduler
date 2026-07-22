@@ -83,3 +83,8 @@ The on-shift landing screen now shows two sections: "Your tasks" (assigned to
 the staff member for this shift, priority-sorted) first, then "Also needs
 doing" — every other not-yet-done task — so staff can pick up extra work.
 Tasks on another person's in-progress shift are excluded. Frontend only.
+
+v3.11 2026-07-19 — Claim button on the on-shift screen:
+Each "Also needs doing" task has a Claim button that assigns it to the staff
+member and attaches it to their current shift, moving it up to "Your tasks".
+Tapping the row still checks a task off; Claim doesn't. Frontend only.

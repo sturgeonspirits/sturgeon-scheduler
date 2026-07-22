@@ -258,6 +258,8 @@
     .ns-meta { font-size:12px; color:var(--muted); font-weight:600; margin-top:2px; }
     .ns-empty { text-align:center; padding:40px 20px; color:var(--muted); }
     .ns-section { font-size:13px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; color:var(--muted); margin:18px 2px 10px; }
+    .ns-claim { flex:none; align-self:center; background:var(--accent); color:#fff; border:none; border-radius:10px; padding:10px 16px; font-size:14px; font-weight:800; cursor:pointer; }
+    .ns-claim:active { opacity:0.7; }
     .ns-foot { padding:12px 16px calc(16px + env(safe-area-inset-bottom)); border-top:1px solid var(--border); background:var(--card); }
     .ns-cal-btn { width:100%; background:var(--primary); color:#fff; border:none; border-radius:14px;
       padding:16px; font-size:16px; font-weight:800; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; }
@@ -888,7 +890,7 @@
     renderNowShift(shift);
   }
 
-  function nsTaskRow(t) {
+  function nsTaskRow(t, claimable) {
     return `
       <div class="ns-task ${t.done ? 'done' : ''}" data-id="${esc(t.id)}">
         <div class="ns-box">${t.done ? '✓' : ''}</div>
@@ -896,6 +898,7 @@
           <div class="ns-text">${esc(t.text)}</div>
           <div class="ns-meta">${taskPrioLabel(t) ? taskPrioLabel(t) + ' · ' : ''}${esc(t.category || 'General')}${!t.done && t.assignedTo ? ' · → ' + esc(staffNameFromEmail(t.assignedTo)) : ''}${t.proofValue ? ' · ✎ ' + esc(t.proofValue) : ''}</div>
         </div>
+        ${claimable ? `<button class="ns-claim js-ns-claim" data-id="${esc(t.id)}">Claim</button>` : ''}
       </div>`;
   }
 
@@ -928,7 +931,7 @@
 
     const othersHtml = others.length ? `
       <div class="ns-section">Also needs doing <span style="font-weight:600; color:var(--muted)">(${others.length})</span></div>
-      ${others.map(nsTaskRow).join("")}` : (mine.length ? `
+      ${others.map(t => nsTaskRow(t, true)).join("")}` : (mine.length ? `
       <div class="ns-section">Also needs doing</div>
       <div class="ns-empty" style="padding:16px;"><div style="font-size:13px;">Everything else is done. 🎉</div></div>` : '');
 
@@ -985,11 +988,34 @@
       if (dx < -60 && Math.abs(dx) > Math.abs(dy) * 1.5) { x0 = null; dismissNowShift(); }
     };
     el.ontouchend = () => { x0 = y0 = null; };
-    // tap-to-check
+    // tap a row to check off; Claim button assigns it to me (doesn't check off)
     if (list) list.onclick = e => {
+      const claim = e.target.closest('.js-ns-claim');
+      if (claim) { e.stopPropagation(); claimNowShiftTask(claim.dataset.id); return; }
       const row = e.target.closest('.ns-task');
       if (row) toggleNowShiftTask(row.dataset.id);
     };
+  }
+
+  // v3.11 2026-07-19 — claim an "Also needs doing" task from the on-shift screen:
+  // assign it to me and attach it to my current shift so it jumps to "Your tasks".
+  function claimNowShiftTask(id) {
+    const t = todosCache.find(x => x.id === id);
+    if (!t) return;
+    const shift = globalShifts.find(s => s.eventId === nowShiftId);
+    // optimistic local update
+    t.assignedTo = bootstrap.me.email;
+    if (shift) { t.shiftId = shift.eventId; t.date = shift.startISO ? isoDate(new Date(shift.startISO)) : t.date; }
+    if (shift) renderNowShift(shift);
+    showToast("It's yours!");
+    api("updateTodo", {
+      sessionToken, id,
+      assignedTo: bootstrap.me.email,
+      shiftId: shift ? shift.eventId : undefined,
+      date: shift && shift.startISO ? isoDate(new Date(shift.startISO)) : undefined
+    })
+      .then(() => invalidateCache(["listTodos", "dashSchedule"]))
+      .catch(() => { showToast("Couldn't claim — try again"); });
   }
 
   window.dismissNowShift = function() {
