@@ -77,3 +77,9 @@ migration needed).
 v3.9 2026-07-19 — Editable task text + category:
 The task edit modal (⋯ on any task) now lets you change the task's wording and
 category, not just assignee/priority/date. Frontend only.
+
+v3.10 2026-07-19 — On-shift screen: my tasks + everything else:
+The on-shift landing screen now shows two sections: "Your tasks" (assigned to
+the staff member for this shift, priority-sorted) first, then "Also needs
+doing" — every other not-yet-done task — so staff can pick up extra work.
+Tasks on another person's in-progress shift are excluded. Frontend only.
