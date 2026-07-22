@@ -488,6 +488,8 @@
       <button class="btn small" onclick="closeModals()">Close</button>
     </div>
     <div id="taskInfo" style="background:#f9f9f9; border-radius:8px; padding:12px; margin-bottom:16px;"></div>
+    <label>Task</label><input type="text" id="tText"><!-- v3.9 2026-07-19 — editable text -->
+    <label>Category</label><select id="tCat"></select>
     <label>Assign To</label><select id="tWho"></select>
     <label>Priority</label><select id="tPrio"></select><!-- v3.8 2026-07-19 -->
     <label>Date (leave blank for anytime)</label><input type="date" id="tDate">
@@ -3116,8 +3118,11 @@
     taskEditing = id;
     document.getElementById("mTask").style.display = "flex";
     document.getElementById("taskInfo").innerHTML = `
-      <div style="font-weight:700; font-size:14px; margin-bottom:2px;">${esc(t.text)}</div>
-      <div class="muted" style="font-size:12px;">${esc(t.category)}${t.addedBy && t.addedBy !== 'Auto' ? ' · added by ' + esc(t.addedBy) : ''}${t.shiftId ? ' · attached to a shift' : ''}</div>`;
+      <div class="muted" style="font-size:12px;">${t.addedBy && t.addedBy !== 'Auto' ? 'Added by ' + esc(t.addedBy) : 'Auto-added'}${t.shiftId ? ' · attached to a shift' : ''}${t.done ? ' · ✓ done' : ''}</div>`;
+    // v3.9 2026-07-19 — editable text + category
+    document.getElementById("tText").value = t.text || "";
+    document.getElementById("tCat").innerHTML =
+      TODO_CATEGORIES.map(c => `<option value="${esc(c)}" ${c === t.category ? 'selected' : ''}>${esc(c)}</option>`).join('');
     document.getElementById("tWho").innerHTML =
       '<option value="">Anyone (unassigned)</option>' +
       bootstrap.staff.map(s => `<option value="${esc(s.email)}" ${s.email === t.assignedTo ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
@@ -3137,7 +3142,12 @@
       // v3.3 2026-07-18 — person+date tasks attach to their shift; warn if none
       const who = document.getElementById("tWho").value;
       const dateVal = document.getElementById("tDate").value;
+      // v3.9 2026-07-19 — text + category are now editable too
+      const newText = document.getElementById("tText").value.trim();
+      if (!newText) { showToast("Task can't be empty"); return; }
       const r = await api("updateTodo", { sessionToken, id, assignedTo: who, date: dateVal,
+        text: newText,
+        category: document.getElementById("tCat").value,
         priority: document.getElementById("tPrio").value }); // v3.8 2026-07-19
       if (r && r.noShift) {
         alert("⚠️ " + staffNameFromEmail(who) + " has no shift on " + fmtShortDate(dateVal) + ".\n\nThe task was saved to that day, but it isn't attached to a shift.");

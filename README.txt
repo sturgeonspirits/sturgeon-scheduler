@@ -73,3 +73,7 @@ Tasks tab. Set it in Add Task and in the task edit modal; recurring templates
 can carry a default priority. Backend v6.5 adds a "priority" column to the
 Todos/TaskTemplates sheets (added automatically on next load — no manual
 migration needed).
+
+v3.9 2026-07-19 — Editable task text + category:
+The task edit modal (⋯ on any task) now lets you change the task's wording and
+category, not just assignee/priority/date. Frontend only.
