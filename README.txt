@@ -59,3 +59,17 @@ shift also pulls fresh task data from the server. Tasks whose shift no longer
 exists are rescued onto the employee's shift for that day. Staff see every
 task assigned to them for a shift as a checklist, expanded by default on their
 own shift cards, and can tick items off inline. Frontend only.
+
+v3.7 2026-07-19 — On-shift landing screen:
+Opening the app during your own scheduled shift now lands on a big, mobile-
+friendly checklist of that shift's tasks (tap to check off, live progress bar).
+Tap "View Schedule" or swipe left to reach the calendar. If not currently on
+shift, the app opens to the schedule as before. Frontend only.
+
+v3.8 / v6.5 2026-07-19 — Task priority:
+Tasks now have a priority (High / Normal / Low). Higher-priority tasks sort to
+the top everywhere — the on-shift checklist, shift-card checklists, and the
+Tasks tab. Set it in Add Task and in the task edit modal; recurring templates
+can carry a default priority. Backend v6.5 adds a "priority" column to the
+Todos/TaskTemplates sheets (added automatically on next load — no manual
+migration needed).

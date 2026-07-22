@@ -1,5 +1,6 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v6.5 — Task priority (high/normal/low); sorts most important to the top (2026-07-19)
  * v6.4 — Hourly rollover: unfinished shift tasks move to the person's next
  *        shift, or back to Up for Grabs if none (2026-07-18)
  * v6.3 — Person+date tasks auto-attach to that person's shift; warn if none (2026-07-18)
@@ -201,7 +202,9 @@ function installTriggers() {
   ScriptApp.newTrigger("sendShiftReminders").timeBased().everyHours(1).create();
   // v6.4 2026-07-18 — unfinished shift tasks roll to the person's next shift
   ScriptApp.newTrigger("rollUnfinishedShiftTasks").timeBased().everyHours(1).create();
-  SpreadsheetApp.getUi().alert("Triggers installed (Hourly Reminders + Task Rollover).");
+  // v6.4.1 2026-07-19 — works from both the Sheet menu and the script editor
+  const msg = "Triggers installed (Hourly Reminders + Task Rollover).";
+  try { SpreadsheetApp.getUi().alert(msg); } catch (_) { Logger.log(msg); }
 }
 
 function setupSheets() {
@@ -216,8 +219,8 @@ function setupSheets() {
   _ensureSheet_(ss, SHEET_BULLETIN, ["id", "message", "updatedBy", "updatedAtISO"]);
   _ensureSheet_(ss, SHEET_NOTES, ["date", "note"]);
   // v6.0 2026-07-18 — Todos gains date/shiftId/assignedTo/proofValue/templateId; TaskTemplates added
-  _ensureSheet_(ss, SHEET_TODOS, ["id", "text", "category", "done", "addedBy", "addedAt", "doneBy", "doneAt", "date", "shiftId", "assignedTo", "proofValue", "templateId"]);
-  _ensureSheet_(ss, SHEET_TEMPLATES, ["id", "text", "category", "recurrence", "targetDuty", "requireProof", "active"]);
+  _ensureSheet_(ss, SHEET_TODOS, ["id", "text", "category", "done", "addedBy", "addedAt", "doneBy", "doneAt", "date", "shiftId", "assignedTo", "proofValue", "templateId", "priority"]); // v6.5 2026-07-19
+  _ensureSheet_(ss, SHEET_TEMPLATES, ["id", "text", "category", "recurrence", "targetDuty", "requireProof", "active", "priority"]);
   _invalidateAllCaches_();
   SpreadsheetApp.getUi().alert("Sheets initialized (with Central Time + Task columns).");
 }
@@ -1706,9 +1709,16 @@ let _todosSchemaEnsured_ = false;
 function _ensureTodosSchema_() {
   if (_todosSchemaEnsured_) return;
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  _ensureSheet_(ss, SHEET_TODOS, ["id", "text", "category", "done", "addedBy", "addedAt", "doneBy", "doneAt", "date", "shiftId", "assignedTo", "proofValue", "templateId"]);
-  _ensureSheet_(ss, SHEET_TEMPLATES, ["id", "text", "category", "recurrence", "targetDuty", "requireProof", "active"]);
+  // v6.5 2026-07-19 — added "priority" column
+  _ensureSheet_(ss, SHEET_TODOS, ["id", "text", "category", "done", "addedBy", "addedAt", "doneBy", "doneAt", "date", "shiftId", "assignedTo", "proofValue", "templateId", "priority"]);
+  _ensureSheet_(ss, SHEET_TEMPLATES, ["id", "text", "category", "recurrence", "targetDuty", "requireProof", "active", "priority"]);
   _todosSchemaEnsured_ = true;
+}
+
+// v6.5 2026-07-19 — normalize priority to one of: high | normal | low
+function _todoPriority_(v) {
+  const p = String(v || "").trim().toLowerCase();
+  return (p === "high" || p === "low") ? p : "normal";
 }
 
 // Sheets may coerce "2026-07-18" cells to Date objects; normalize on read.
@@ -1734,7 +1744,8 @@ function api_listTodos(data) {
     shiftId:    String(r.shiftId  || ""),
     assignedTo: _normEmail_(r.assignedTo),
     proofValue: String(r.proofValue || ""),
-    templateId: String(r.templateId || "")
+    templateId: String(r.templateId || ""),
+    priority:   _todoPriority_(r.priority) // v6.5 2026-07-19
   }));
   return { items };
 }
@@ -1781,7 +1792,8 @@ function api_saveTodo(data) {
     shiftId:    shiftId,
     assignedTo: assignedTo,
     proofValue: "",
-    templateId: String(data.templateId || "")
+    templateId: String(data.templateId || ""),
+    priority:   _todoPriority_(data.priority) // v6.5 2026-07-19
   });
   return { id, attached, noShift };
 }
@@ -1797,6 +1809,7 @@ function api_updateTodo(data) {
   if (data.date       !== undefined) patch.date = _todoDateStr_(data.date);
   if (data.shiftId    !== undefined) patch.shiftId = String(data.shiftId);
   if (data.assignedTo !== undefined) patch.assignedTo = _normEmail_(data.assignedTo);
+  if (data.priority   !== undefined) patch.priority = _todoPriority_(data.priority); // v6.5 2026-07-19
   if (!Object.keys(patch).length) return { updated: false };
 
   // v6.3 2026-07-18 — when person or date changes (and shiftId wasn't set
@@ -2013,7 +2026,8 @@ function _materializeTemplates_() {
           addedAt: new Date().toISOString(),
           doneBy: "", doneAt: "",
           date: dateStr, shiftId: "", assignedTo: "", proofValue: "",
-          templateId: String(t.id)
+          templateId: String(t.id),
+          priority: _todoPriority_(t.priority) // v6.5 2026-07-19 — inherit template priority
         });
         existing[String(t.id) + "|" + dateStr] = true;
       });

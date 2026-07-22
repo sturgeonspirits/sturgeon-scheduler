@@ -233,6 +233,34 @@
     .sgrid-blk.open { background:repeating-linear-gradient(45deg, #8a6d1f, #8a6d1f 6px, #a3832a 6px, #a3832a 12px) !important; border-style:dashed; }
     .sgrid-blk.openended { border-bottom:2px dashed rgba(255,255,255,0.8); }
     .sgrid-note { background:#fff; border:1px dashed var(--accent); color:var(--text); border-radius:6px; padding:2px 5px; margin-bottom:2px; font-size:10px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+    /* v3.7 2026-07-19 — On-shift landing screen (mobile-first task checklist) */
+    .nowshift { position:fixed; inset:0; z-index:60; background:var(--bg); display:flex; flex-direction:column;
+      padding:env(safe-area-inset-top) 0 0; transition:transform 0.3s ease; touch-action:pan-y; }
+    .nowshift.hiding { transform:translateX(-100%); }
+    .ns-head { padding:20px 20px 16px; }
+    .ns-kicker { font-size:12px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; color:var(--accent); }
+    .ns-title { font-size:26px; font-weight:800; color:var(--primary); margin:4px 0 2px; }
+    .ns-sub { font-size:14px; color:var(--muted); font-weight:600; }
+    .ns-progress-track { height:10px; background:rgba(0,0,0,0.08); border-radius:99px; overflow:hidden; margin-top:14px; }
+    .ns-progress-fill { height:100%; background:var(--ok); border-radius:99px; transition:width 0.35s ease; }
+    .ns-progress-label { font-size:12px; font-weight:700; color:var(--muted); margin-top:6px; }
+    .ns-list { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:4px 16px 16px; }
+    .ns-task { display:flex; align-items:center; gap:14px; background:var(--card); border:1px solid var(--border);
+      border-radius:16px; padding:16px; margin-bottom:12px; cursor:pointer; user-select:none;
+      box-shadow:0 2px 8px rgba(0,0,0,0.04); transition:opacity 0.2s, background 0.2s; }
+    .ns-task:active { background:#faf8f2; }
+    .ns-box { flex:none; width:34px; height:34px; border-radius:10px; border:3px solid var(--border);
+      display:flex; align-items:center; justify-content:center; font-size:20px; color:#fff; transition:all 0.15s; }
+    .ns-task.done .ns-box { background:var(--ok); border-color:var(--ok); }
+    .ns-task.done .ns-text { text-decoration:line-through; color:var(--muted); }
+    .ns-text { font-size:16px; font-weight:700; line-height:1.3; }
+    .ns-meta { font-size:12px; color:var(--muted); font-weight:600; margin-top:2px; }
+    .ns-empty { text-align:center; padding:40px 20px; color:var(--muted); }
+    .ns-foot { padding:12px 16px calc(16px + env(safe-area-inset-bottom)); border-top:1px solid var(--border); background:var(--card); }
+    .ns-cal-btn { width:100%; background:var(--primary); color:#fff; border:none; border-radius:14px;
+      padding:16px; font-size:16px; font-weight:800; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; }
+    .ns-swipe-hint { text-align:center; font-size:12px; color:var(--muted); margin-top:8px; font-weight:600; }
   </style>
 </head>
 <body>
@@ -278,6 +306,9 @@
     <button class="btn primary" style="width:100%;" onclick="closeModals()">Got It</button>
   </div>
 </div>
+
+<!-- v3.7 2026-07-19 — On-shift landing screen -->
+<div id="nowShift" class="nowshift" style="display:none"></div>
 
 <div class="toast" id="toast"></div>
 
@@ -458,6 +489,7 @@
     </div>
     <div id="taskInfo" style="background:#f9f9f9; border-radius:8px; padding:12px; margin-bottom:16px;"></div>
     <label>Assign To</label><select id="tWho"></select>
+    <label>Priority</label><select id="tPrio"></select><!-- v3.8 2026-07-19 -->
     <label>Date (leave blank for anytime)</label><input type="date" id="tDate">
     <div class="row" style="margin-top:16px">
       <button class="btn danger" id="btnDelTask" style="display:none; flex:1">Delete</button>
@@ -747,6 +779,9 @@
       renderNav();
       startPoller();
       render(true);
+      // v3.7 2026-07-19 — if opening during your own shift, land on the task
+      // checklist for that shift; the calendar is one tap/swipe away.
+      maybeShowOnShift().catch(() => {});
     } catch(e) {
       console.error("Bootstrap failed:", e);
       if (e.message.includes("Session expired") || e.message.includes("Account revoked")) {
@@ -808,6 +843,134 @@
       clearViewLoading();
     }
   }
+
+  // ==========================================================================
+  // v3.7 2026-07-19 — On-shift landing screen
+  // Opening the app during your own scheduled shift shows that shift's task
+  // checklist first (big, mobile-friendly, tap to check off). The calendar is
+  // one tap ("View Schedule") or a left-swipe away.
+  // ==========================================================================
+  let nowShiftId = null;
+
+  function myCurrentShift() {
+    const now = Date.now();
+    const email = (bootstrap.me.email || '').toLowerCase();
+    const name = bootstrap.me.name;
+    const mine = (globalShifts || []).filter(s =>
+      !s.isOpen && !String(s.eventId).startsWith('NOTE_') && !s.isUnavail && s.startISO &&
+      ((s.staffEmail || '').toLowerCase() === email || s.staffName === name));
+    return mine.find(s => {
+      const start = new Date(s.startISO).getTime();
+      let end;
+      if (s.isOpenEnded || !s.endISO) {
+        const d = new Date(s.startISO); d.setHours(23, 59, 59, 999); end = d.getTime(); // through end of the day
+      } else {
+        end = new Date(s.endISO).getTime();
+      }
+      return now >= start && now <= end;
+    }) || null;
+  }
+
+  async function maybeShowOnShift() {
+    // Load this week's shifts + tasks so we can detect a live shift
+    await api("dashSchedule", { sessionToken, mode: 'week', weekStartISO: weekStart.toISOString() }, { cache: true })
+      .then(d => { globalShifts = d.shifts || []; });
+    await loadTodosSafe();
+    syncShiftTaskAssignees();
+    buildTaskMaps();
+
+    const shift = myCurrentShift();
+    if (!shift) return;
+    nowShiftId = shift.eventId;
+    renderNowShift(shift);
+  }
+
+  function renderNowShift(shift) {
+    const agenda = shiftAgendaTasks(shift);
+    const tasks = [...agenda.attached, ...agenda.assigned]
+      .filter((t, i, arr) => arr.findIndex(x => x.id === t.id) === i)
+      .sort(byPriority); // v3.8 2026-07-19 — most important first
+    const openCount = tasks.filter(t => !t.done).length;
+    const doneCount = tasks.length - openCount;
+    const pct = tasks.length ? Math.round((doneCount / tasks.length) * 100) : 0;
+    const when = fmtShiftTime(shift);
+    const roleLoc = [shift.task, shift.location].filter(Boolean).join(' · ');
+
+    const rows = tasks.length ? tasks.map(t => `
+      <div class="ns-task ${t.done ? 'done' : ''}" data-id="${esc(t.id)}">
+        <div class="ns-box">${t.done ? '✓' : ''}</div>
+        <div style="flex:1; min-width:0;">
+          <div class="ns-text">${esc(t.text)}</div>
+          <div class="ns-meta">${taskPrioLabel(t) ? taskPrioLabel(t) + ' · ' : ''}${esc(t.category || 'General')}${t.proofValue ? ' · ✎ ' + esc(t.proofValue) : ''}</div>
+        </div>
+      </div>`).join("")
+      : `<div class="ns-empty"><div style="font-size:40px; margin-bottom:8px;">✅</div>
+           <div style="font-weight:700; color:var(--text);">No tasks for this shift</div>
+           <div style="font-size:13px; margin-top:4px;">You're all set — enjoy your shift.</div></div>`;
+
+    const el = document.getElementById("nowShift");
+    el.innerHTML = `
+      <div class="ns-head">
+        <div class="ns-kicker">● On shift now</div>
+        <div class="ns-title">Hi ${esc((bootstrap.me.name || '').split(' ')[0])} 👋</div>
+        <div class="ns-sub">${esc(roleLoc || 'Your shift')} · ${esc(when)}</div>
+        ${tasks.length ? `
+          <div class="ns-progress-track"><div class="ns-progress-fill" style="width:${pct}%"></div></div>
+          <div class="ns-progress-label" id="nsProgLabel">${doneCount} of ${tasks.length} done</div>` : ''}
+      </div>
+      <div class="ns-list">${rows}</div>
+      <div class="ns-foot">
+        <button class="ns-cal-btn" onclick="dismissNowShift()">📅 View Schedule</button>
+        <div class="ns-swipe-hint">or swipe left to see the calendar</div>
+      </div>`;
+    el.classList.remove('hiding');
+    el.style.display = 'flex';
+    el.style.transform = '';
+    attachNowShiftGestures(el);
+  }
+
+  function toggleNowShiftTask(id) {
+    const t = todosCache.find(x => x.id === id);
+    if (!t) return;
+    // proof-required templates: fall back to the standard prompt flow
+    if (!t.done && t.templateId) {
+      const tpl = (templatesCache || []).find(x => x.id === t.templateId);
+      if (tpl && tpl.requireProof) { toggleTodo(id, true); dismissNowShift(); return; }
+    }
+    const newDone = !t.done;
+    t.done = newDone; // optimistic
+    api("toggleTodo", { sessionToken, id, done: newDone, proofValue: "" })
+      .then(() => invalidateCache(["listTodos", "dashSchedule"]))
+      .catch(() => { t.done = !newDone; showToast("Couldn't update — try again"); renderNowShift(myCurrentShift() || {}); });
+    const shift = globalShifts.find(s => s.eventId === nowShiftId);
+    if (shift) renderNowShift(shift);
+  }
+
+  function attachNowShiftGestures(el) {
+    const list = el.querySelector('.ns-list');
+    let x0 = null, y0 = null;
+    el.ontouchstart = e => { const t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; };
+    el.ontouchmove = e => {
+      if (x0 == null) return;
+      const t = e.touches[0], dx = t.clientX - x0, dy = t.clientY - y0;
+      // horizontal left-swipe that isn't a vertical scroll
+      if (dx < -60 && Math.abs(dx) > Math.abs(dy) * 1.5) { x0 = null; dismissNowShift(); }
+    };
+    el.ontouchend = () => { x0 = y0 = null; };
+    // tap-to-check
+    if (list) list.onclick = e => {
+      const row = e.target.closest('.ns-task');
+      if (row) toggleNowShiftTask(row.dataset.id);
+    };
+  }
+
+  window.dismissNowShift = function() {
+    const el = document.getElementById("nowShift");
+    el.classList.add('hiding');
+    setTimeout(() => { el.style.display = 'none'; el.innerHTML = ''; }, 300);
+    // the schedule tab is already rendered underneath; make sure it reflects checks
+    render(true);
+  };
 
   function isAnyoneSwap(s) { return s.toEmail === '__anyone__'; }
 
@@ -2529,6 +2692,27 @@
   // v2 2026-05-26 — Staff To-Do List
   const TODO_CAT_CLASS = { "Bar Prep": "barprep", "Shopping": "shopping", "Cleaning": "cleaning", "Production/Sales": "prodsales", "General": "general" };
   const TODO_CATEGORIES = ["Bar Prep", "Shopping", "Cleaning", "Production/Sales", "General"];
+  // v3.8 2026-07-19 — task priority: sorts most important to the top everywhere
+  const TASK_PRIORITIES = [
+    { v: "high",   label: "🔴 High",   rank: 0 },
+    { v: "normal", label: "⚪ Normal", rank: 1 },
+    { v: "low",    label: "🔵 Low",    rank: 2 }
+  ];
+  function taskPrioRank(t) {
+    const p = TASK_PRIORITIES.find(x => x.v === String(t && t.priority || 'normal'));
+    return p ? p.rank : 1;
+  }
+  function taskPrioLabel(t) {
+    const v = String(t && t.priority || 'normal');
+    if (v === 'high') return '🔴 High';
+    if (v === 'low') return '🔵 Low';
+    return '';
+  }
+  // Sort by priority (High→Low), keeping done tasks last; stable otherwise.
+  function byPriority(a, b) {
+    if (!!a.done !== !!b.done) return a.done ? 1 : -1;
+    return taskPrioRank(a) - taskPrioRank(b);
+  }
 
   // ════════════════════════════════════════════════════════════════════════
   // v3 2026-07-18 — Task assignment system
@@ -2648,6 +2832,7 @@
     const today = isoDate(new Date());
     const overdue = !t.done && t.date && t.date < today;
     const metaBits = [];
+    if (taskPrioLabel(t)) metaBits.push(taskPrioLabel(t)); // v3.8 2026-07-19
     if (t.assignedTo) metaBits.push('→ ' + esc(staffNameFromEmail(t.assignedTo)));
     if (t.date && opts.showDate !== false) metaBits.push(overdue ? 'since ' + esc(fmtShortDate(t.date)) : 'for ' + esc(fmtShortDate(t.date)));
     if (t.shiftId && opts.showShift !== false) metaBits.push('shift task');
@@ -2674,7 +2859,7 @@
     const open = expandedTasks.has(key) || (autoOpen && !collapsedTasks.has(key));
     return `
       <div class="task-list-under" style="display:${open ? 'block' : 'none'}">
-        ${tasks.map(t => renderTaskRow(t, { showDate: false, showShift: false })).join("") || '<div class="muted" style="font-size:12px; padding:4px 0;">No tasks yet — add one below.</div>'}
+        ${[...tasks].sort(byPriority).map(t => renderTaskRow(t, { showDate: false, showShift: false })).join("") || '<div class="muted" style="font-size:12px; padding:4px 0;">No tasks yet — add one below.</div>'}
         <div class="task-quickadd">
           <input type="text" placeholder="Add task…" class="js-task-input">
           <button class="btn small accent js-task-quickadd" data-shiftid="${esc(ctx.shiftId || '')}" data-date="${esc(ctx.date || '')}" data-assignedto="${esc(ctx.assignedTo || '')}">Add</button>
@@ -2770,8 +2955,8 @@
     const section = (title, list, opts, titleStyle) => list.length ? `
       <div class="card">
         <div class="h2" style="margin-bottom:10px; ${titleStyle || ''}">${title} <span style="font-weight:400; color:var(--muted); font-size:14px">(${list.length})</span></div>
-        ${list.map(t => renderTaskRow(t, opts)).join('')}
-      </div>` : '';
+        ${[...list].sort(byPriority).map(t => renderTaskRow(t, opts)).join('')}
+      </div>` : ''; // v3.8 2026-07-19 — priority-sorted
 
     let html = `
       <div class="segmented">
@@ -2792,9 +2977,12 @@
           </select>
         </div>
         <div class="row" style="gap:8px; margin-top:8px; flex-wrap:nowrap;">
+          <select id="todoPrio" style="flex:1; margin-bottom:0; min-width:0;">
+            ${TASK_PRIORITIES.map(p => `<option value="${p.v}" ${p.v==='normal'?'selected':''}>${esc(p.label)}</option>`).join('')}
+          </select>
           <input type="date" id="todoDate" style="flex:1; margin-bottom:0; min-width:0;">
           <button class="btn accent" id="btnAddTodo" onclick="addTodo()" style="flex:none">+ Add</button>
-        </div>
+        </div><!-- v3.8 2026-07-19 — priority -->
         ${templatesCache.filter(t => t.active).length ? `
           <div class="tpl-chips">
             ${templatesCache.filter(t => t.active).map(t => `<button class="tpl-chip js-tpl-chip" data-id="${esc(t.id)}">+ ${esc(t.text)}</button>`).join('')}
@@ -2869,6 +3057,7 @@
       const r = await api("saveTodo", {
         sessionToken, text,
         category: document.getElementById("todoCat").value,
+        priority: document.getElementById("todoPrio").value, // v3.8 2026-07-19
         assignedTo: who,
         date: dateVal
       });
@@ -2932,6 +3121,9 @@
     document.getElementById("tWho").innerHTML =
       '<option value="">Anyone (unassigned)</option>' +
       bootstrap.staff.map(s => `<option value="${esc(s.email)}" ${s.email === t.assignedTo ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+    // v3.8 2026-07-19 — priority picker
+    document.getElementById("tPrio").innerHTML =
+      TASK_PRIORITIES.map(p => `<option value="${p.v}" ${p.v === String(t.priority || 'normal') ? 'selected' : ''}>${esc(p.label)}</option>`).join('');
     document.getElementById("tDate").value = t.date || "";
     const canDel = bootstrap.me.isManager || t.addedBy === bootstrap.me.name;
     document.getElementById("btnDelTask").style.display = canDel ? "block" : "none";
@@ -2945,7 +3137,8 @@
       // v3.3 2026-07-18 — person+date tasks attach to their shift; warn if none
       const who = document.getElementById("tWho").value;
       const dateVal = document.getElementById("tDate").value;
-      const r = await api("updateTodo", { sessionToken, id, assignedTo: who, date: dateVal });
+      const r = await api("updateTodo", { sessionToken, id, assignedTo: who, date: dateVal,
+        priority: document.getElementById("tPrio").value }); // v3.8 2026-07-19
       if (r && r.noShift) {
         alert("⚠️ " + staffNameFromEmail(who) + " has no shift on " + fmtShortDate(dateVal) + ".\n\nThe task was saved to that day, but it isn't attached to a shift.");
       } else if (r && r.attached) {
