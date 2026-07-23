@@ -1,5 +1,8 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v6.7 — Optional task due time: tasks can stay "open" (date only, or no
+ *        date at all) or be pinned to a specific date+time (2026-07-23)
+ * v6.6 — Added "Food Prep" shift role (food service launch) (2026-07-19)
  * v6.5 — Task priority (high/normal/low); sorts most important to the top (2026-07-19)
  * v6.4 — Hourly rollover: unfinished shift tasks move to the person's next
  *        shift, or back to Up for Grabs if none (2026-07-18)
