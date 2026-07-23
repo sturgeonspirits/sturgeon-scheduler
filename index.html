@@ -179,6 +179,7 @@
       padding:2px 7px; border-radius:4px; margin-right:4px;
     }
     .cat-barprep  { background:#e8f0fe; color:#1a56db; }
+    .cat-foodprep { background:#ffe4e6; color:#9f1239; }
     .cat-shopping { background:#fef3c7; color:#b45309; }
     .cat-cleaning  { background:#d1fae5; color:#065f46; }
     .cat-prodsales { background:#ede9fe; color:#5b21b6; }
@@ -939,7 +940,7 @@
     el.innerHTML = `
       <div class="ns-head">
         <div class="ns-kicker">● On shift now</div>
-        <div class="ns-title">Hi ${esc((bootstrap.me.name || '').split(' ')[0])} 👋</div>
+        <div class="ns-title">Hi ${esc((bootstrap.me.name || '').split(' ')[0])}</div>
         <div class="ns-sub">${esc(roleLoc || 'Your shift')} · ${esc(when)}</div>
         ${mine.length ? `
           <div class="ns-progress-track"><div class="ns-progress-fill" style="width:${pct}%"></div></div>
@@ -2744,8 +2745,9 @@
   document.getElementById("uaRecur").onchange = e => document.getElementById("uaRecurBox").style.display = e.target.checked ? "block" : "none";
 
   // v2 2026-05-26 — Staff To-Do List
-  const TODO_CAT_CLASS = { "Bar Prep": "barprep", "Shopping": "shopping", "Cleaning": "cleaning", "Production/Sales": "prodsales", "General": "general" };
-  const TODO_CATEGORIES = ["Bar Prep", "Shopping", "Cleaning", "Production/Sales", "General"];
+  // v3.12 2026-07-19 — added "Food Prep" category
+  const TODO_CAT_CLASS = { "Bar Prep": "barprep", "Food Prep": "foodprep", "Shopping": "shopping", "Cleaning": "cleaning", "Production/Sales": "prodsales", "General": "general" };
+  const TODO_CATEGORIES = ["Bar Prep", "Food Prep", "Shopping", "Cleaning", "Production/Sales", "General"];
   // v3.8 2026-07-19 — task priority: sorts most important to the top everywhere
   const TASK_PRIORITIES = [
     { v: "high",   label: "🔴 High",   rank: 0 },
