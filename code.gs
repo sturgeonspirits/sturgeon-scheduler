@@ -220,7 +220,7 @@ function setupSheets() {
   _ensureSheet_(ss, SHEET_BULLETIN, ["id", "message", "updatedBy", "updatedAtISO"]);
   _ensureSheet_(ss, SHEET_NOTES, ["date", "note"]);
   // v6.0 2026-07-18 — Todos gains date/shiftId/assignedTo/proofValue/templateId; TaskTemplates added
-  _ensureSheet_(ss, SHEET_TODOS, ["id", "text", "category", "done", "addedBy", "addedAt", "doneBy", "doneAt", "date", "shiftId", "assignedTo", "proofValue", "templateId", "priority"]); // v6.5 2026-07-19
+  _ensureSheet_(ss, SHEET_TODOS, ["id", "text", "category", "done", "addedBy", "addedAt", "doneBy", "doneAt", "date", "shiftId", "assignedTo", "proofValue", "templateId", "priority", "time"]); // v6.7 2026-07-23 — optional due time
   _ensureSheet_(ss, SHEET_TEMPLATES, ["id", "text", "category", "recurrence", "targetDuty", "requireProof", "active", "priority"]);
   _invalidateAllCaches_();
   SpreadsheetApp.getUi().alert("Sheets initialized (with Central Time + Task columns).");
@@ -1710,8 +1710,8 @@ let _todosSchemaEnsured_ = false;
 function _ensureTodosSchema_() {
   if (_todosSchemaEnsured_) return;
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  // v6.5 2026-07-19 — added "priority" column
-  _ensureSheet_(ss, SHEET_TODOS, ["id", "text", "category", "done", "addedBy", "addedAt", "doneBy", "doneAt", "date", "shiftId", "assignedTo", "proofValue", "templateId", "priority"]);
+  // v6.7 2026-07-23 — added "time" column (optional due time, HH:MM)
+  _ensureSheet_(ss, SHEET_TODOS, ["id", "text", "category", "done", "addedBy", "addedAt", "doneBy", "doneAt", "date", "shiftId", "assignedTo", "proofValue", "templateId", "priority", "time"]);
   _ensureSheet_(ss, SHEET_TEMPLATES, ["id", "text", "category", "recurrence", "targetDuty", "requireProof", "active", "priority"]);
   _todosSchemaEnsured_ = true;
 }
@@ -1728,6 +1728,15 @@ function _todoDateStr_(v) {
   return String(v || "").trim();
 }
 
+// v6.7 2026-07-23 — optional due time. A task can be "open" (date only, or no
+// date at all) or pinned to a specific time (date + time). Sheets may coerce
+// "15:00" cells to Date objects; normalize on read. Validates HH:MM, else "".
+function _todoTimeStr_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, TZ_CENTRAL, "HH:mm");
+  const s = String(v || "").trim();
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(s) ? s : "";
+}
+
 function api_listTodos(data) {
   _requireSession_(data.sessionToken);
   _ensureTodosSchema_();
@@ -1742,6 +1751,7 @@ function api_listTodos(data) {
     doneBy:     String(r.doneBy   || ""),
     doneAt:     String(r.doneAt   || ""),
     date:       _todoDateStr_(r.date),
+    time:       _todoTimeStr_(r.time), // v6.7 2026-07-23
     shiftId:    String(r.shiftId  || ""),
     assignedTo: _normEmail_(r.assignedTo),
     proofValue: String(r.proofValue || ""),
@@ -1773,6 +1783,7 @@ function api_saveTodo(data) {
   // caller is told when there is no shift so the UI can warn.
   const assignedTo = _normEmail_(data.assignedTo);
   const date = _todoDateStr_(data.date);
+  const time = _todoTimeStr_(data.time); // v6.7 2026-07-23 — optional, "" = open/anytime
   let shiftId = String(data.shiftId || "");
   let attached = false, noShift = false;
   if (!shiftId && assignedTo && date) {
@@ -1790,6 +1801,7 @@ function api_saveTodo(data) {
     doneBy:     "",
     doneAt:     "",
     date:       date,
+    time:       time, // v6.7 2026-07-23
     shiftId:    shiftId,
     assignedTo: assignedTo,
     proofValue: "",
@@ -1808,6 +1820,7 @@ function api_updateTodo(data) {
   if (data.text       !== undefined) patch.text = String(data.text);
   if (data.category   !== undefined) patch.category = String(data.category);
   if (data.date       !== undefined) patch.date = _todoDateStr_(data.date);
+  if (data.time       !== undefined) patch.time = _todoTimeStr_(data.time); // v6.7 2026-07-23
   if (data.shiftId    !== undefined) patch.shiftId = String(data.shiftId);
   if (data.assignedTo !== undefined) patch.assignedTo = _normEmail_(data.assignedTo);
   if (data.priority   !== undefined) patch.priority = _todoPriority_(data.priority); // v6.5 2026-07-19

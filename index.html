@@ -497,6 +497,7 @@
     <label>Assign To</label><select id="tWho"></select>
     <label>Priority</label><select id="tPrio"></select><!-- v3.8 2026-07-19 -->
     <label>Date (leave blank for anytime)</label><input type="date" id="tDate">
+    <label>Time (optional — leave blank for an open task)</label><input type="time" id="tTime"><!-- v3.14 2026-07-23 -->
     <div class="row" style="margin-top:16px">
       <button class="btn danger" id="btnDelTask" style="display:none; flex:1">Delete</button>
       <button class="btn primary" id="btnSaveTask" style="flex:2">Save</button>
@@ -2882,6 +2883,14 @@
     return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
 
+  // v3.14 2026-07-23 — "HH:MM" (24h, from <input type=time>) -> "3:00 PM"
+  function fmtTimeStr(tstr) {
+    if (!tstr) return "";
+    const [h, m] = tstr.split(":").map(Number);
+    if (isNaN(h) || isNaN(m)) return "";
+    return new Date(2000, 0, 1, h, m).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+
   function renderTaskRow(t, opts) {
     opts = opts || {};
     const cls = TODO_CAT_CLASS[t.category] || "general";
@@ -2890,7 +2899,17 @@
     const metaBits = [];
     if (taskPrioLabel(t)) metaBits.push(taskPrioLabel(t)); // v3.8 2026-07-19
     if (t.assignedTo) metaBits.push('→ ' + esc(staffNameFromEmail(t.assignedTo)));
-    if (t.date && opts.showDate !== false) metaBits.push(overdue ? 'since ' + esc(fmtShortDate(t.date)) : 'for ' + esc(fmtShortDate(t.date)));
+    // v3.14 2026-07-23 — open tasks show just the date; tasks with a specific
+    // time show "for Jul 24 at 3:00 PM" (overdue ones never show time — the
+    // moment has passed, only the rolled-forward date matters). When the date
+    // itself is hidden (e.g. "Today" section, inline checklists), still show
+    // a bare time so a specific-time task doesn't look identical to an open one.
+    if (t.date && opts.showDate !== false) {
+      const whenLabel = t.time && !overdue ? esc(fmtShortDate(t.date)) + ' at ' + esc(fmtTimeStr(t.time)) : esc(fmtShortDate(t.date));
+      metaBits.push(overdue ? 'since ' + whenLabel : 'for ' + whenLabel);
+    } else if (t.time && !overdue) {
+      metaBits.push('at ' + esc(fmtTimeStr(t.time)));
+    }
     if (t.shiftId && opts.showShift !== false) metaBits.push('shift task');
     if (t.addedBy && t.addedBy !== 'Auto') metaBits.push('added by ' + esc(t.addedBy));
     if (t.done && t.doneBy) metaBits.push('done by ' + esc(t.doneBy));
@@ -3037,8 +3056,11 @@
             ${TASK_PRIORITIES.map(p => `<option value="${p.v}" ${p.v==='normal'?'selected':''}>${esc(p.label)}</option>`).join('')}
           </select>
           <input type="date" id="todoDate" style="flex:1; margin-bottom:0; min-width:0;">
-          <button class="btn accent" id="btnAddTodo" onclick="addTodo()" style="flex:none">+ Add</button>
         </div><!-- v3.8 2026-07-19 — priority -->
+        <div class="row" style="gap:8px; margin-top:8px; flex-wrap:nowrap;">
+          <input type="time" id="todoTime" style="flex:1; margin-bottom:0; min-width:0;" title="Optional — leave blank for an open (anytime that day) task">
+          <button class="btn accent" id="btnAddTodo" onclick="addTodo()" style="flex:none">+ Add</button>
+        </div><!-- v3.14 2026-07-23 — optional due time -->
         ${templatesCache.filter(t => t.active).length ? `
           <div class="tpl-chips">
             ${templatesCache.filter(t => t.active).map(t => `<button class="tpl-chip js-tpl-chip" data-id="${esc(t.id)}">+ ${esc(t.text)}</button>`).join('')}
@@ -3049,7 +3071,8 @@
       const mine = todos.filter(t => t.assignedTo === me.email);
       const overdue  = mine.filter(t => !t.done && t.date && t.date < today);
       const dueToday = mine.filter(t => !t.done && t.date === today);
-      const upcoming = mine.filter(t => !t.done && t.date && t.date > today).sort((a, b) => a.date < b.date ? -1 : 1);
+      const upcoming = mine.filter(t => !t.done && t.date && t.date > today)
+        .sort((a, b) => { const ka = a.date + (a.time || ''); const kb = b.date + (b.time || ''); return ka < kb ? -1 : ka > kb ? 1 : 0; }); // v3.14 2026-07-23 — sort by date+time
       const anytime  = mine.filter(t => !t.done && !t.date);
       const doneMine = mine.filter(t => t.done);
 
@@ -3110,14 +3133,17 @@
       // v3.3 2026-07-18 — person+date tasks attach to their shift; warn if none
       const who = document.getElementById("todoWho").value;
       const dateVal = document.getElementById("todoDate").value;
+      const timeVal = document.getElementById("todoTime").value; // v3.14 2026-07-23
       const r = await api("saveTodo", {
         sessionToken, text,
         category: document.getElementById("todoCat").value,
         priority: document.getElementById("todoPrio").value, // v3.8 2026-07-19
         assignedTo: who,
-        date: dateVal
+        date: dateVal,
+        time: timeVal // v3.14 2026-07-23
       });
       textEl.value = "";
+      document.getElementById("todoTime").value = "";
       if (r && r.noShift) {
         alert("⚠️ " + staffNameFromEmail(who) + " has no shift on " + fmtShortDate(dateVal) + ".\n\nThe task was saved to that day, but it isn't attached to a shift.");
       } else if (r && r.attached) {
@@ -3184,6 +3210,7 @@
     document.getElementById("tPrio").innerHTML =
       TASK_PRIORITIES.map(p => `<option value="${p.v}" ${p.v === String(t.priority || 'normal') ? 'selected' : ''}>${esc(p.label)}</option>`).join('');
     document.getElementById("tDate").value = t.date || "";
+    document.getElementById("tTime").value = t.time || ""; // v3.14 2026-07-23
     const canDel = bootstrap.me.isManager || t.addedBy === bootstrap.me.name;
     document.getElementById("btnDelTask").style.display = canDel ? "block" : "none";
   }
@@ -3196,10 +3223,11 @@
       // v3.3 2026-07-18 — person+date tasks attach to their shift; warn if none
       const who = document.getElementById("tWho").value;
       const dateVal = document.getElementById("tDate").value;
+      const timeVal = document.getElementById("tTime").value; // v3.14 2026-07-23
       // v3.9 2026-07-19 — text + category are now editable too
       const newText = document.getElementById("tText").value.trim();
       if (!newText) { showToast("Task can't be empty"); return; }
-      const r = await api("updateTodo", { sessionToken, id, assignedTo: who, date: dateVal,
+      const r = await api("updateTodo", { sessionToken, id, assignedTo: who, date: dateVal, time: timeVal,
         text: newText,
         category: document.getElementById("tCat").value,
         priority: document.getElementById("tPrio").value }); // v3.8 2026-07-19
@@ -3249,7 +3277,7 @@
       html += `<div class="muted" style="font-size:11px; font-weight:700; margin-top:8px;">Also assigned to ${esc(who)}:</div>` +
         agenda.assigned.map(t => `
         <div class="row" style="justify-content:space-between; padding:6px 0; border-bottom:1px solid #eee; flex-wrap:nowrap;">
-          <div style="font-size:13px; flex:1; min-width:0;">${esc(t.text)}${t.date ? ` <span class="muted" style="font-size:11px">· ${esc(fmtShortDate(t.date))}</span>` : ' <span class="muted" style="font-size:11px">· anytime</span>'}</div>
+          <div style="font-size:13px; flex:1; min-width:0;">${esc(t.text)}${t.date ? ` <span class="muted" style="font-size:11px">· ${esc(fmtShortDate(t.date))}${t.time ? ' at ' + esc(fmtTimeStr(t.time)) : ''}</span>` : ' <span class="muted" style="font-size:11px">· anytime</span>'}</div><!-- v3.14 2026-07-23 -->
           <button class="btn small accent" type="button" style="flex:none;" onclick="attachAssignedTask('${esc(t.id)}')">Attach</button>
         </div>`).join("");
     }
