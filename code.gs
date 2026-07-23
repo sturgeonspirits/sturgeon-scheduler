@@ -26,7 +26,8 @@ const SITE_URL = "https://sturgeon-scheduler.netlify.app";
 const API_KEY = "SSCHED_9f3c7c1b5e9a4c6aa2f2d7a9c84b1e6d";
 
 // ====== CONSTANTS ======
-const TASKS = ["Bartender", "Bar back", "Server", "On-call", "Production", "Marketing", "Distribution"];
+// v6.6 2026-07-19 — added "Food Prep" shift role (food service launch)
+const TASKS = ["Bartender", "Bar back", "Server", "Food Prep", "On-call", "Production", "Marketing", "Distribution"];
 const LOCATIONS = ["Distillery", "Tasting Room", "Ready Room", "On the Lake", "Offsite"];
 const TZ_CENTRAL = "America/Chicago";
 

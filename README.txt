@@ -88,3 +88,10 @@ v3.11 2026-07-19 — Claim button on the on-shift screen:
 Each "Also needs doing" task has a Claim button that assigns it to the staff
 member and attaches it to their current shift, moving it up to "Your tasks".
 Tapping the row still checks a task off; Claim doesn't. Frontend only.
+
+v3.12–3.13 / v6.6 2026-07-19 — Food service:
+Added "Food Prep" as a to-do task category (with its own badge) AND as a shift
+role (backend v6.6 TASKS list) for the new food service. The shift modal's
+"Task" dropdown was renamed "Shift Role" to distinguish shift roles from to-do
+tasks. Food Prep has a matching color in the staffing grid. Backend redeploy
+required so the new role reaches the Shift Role dropdown.

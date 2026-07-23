@@ -332,7 +332,7 @@
       <label>Staff</label><select id="fStaff"></select>
     </div>
 
-    <label>Task</label><select id="fTask"></select>
+    <label>Shift Role</label><select id="fTask"></select><!-- v3.13 2026-07-19 — renamed from "Task" to avoid confusion with to-do tasks -->
     <label>Location</label><select id="fLocation"></select>
     <label>Date</label><input type="date" id="fDate">
     <div class="row">
@@ -1341,7 +1341,7 @@
   const GRID_HOUR_PX = 48;
   const GRID_TASK_COLORS = {
     "Bartender":"#0B1F3B", "Bar back":"#3A5A8C", "Server":"#C9A24A",
-    "On-call":"#5A6573", "Production":"#2E7D32", "Marketing":"#8E44AD", "Distribution":"#B3541E"
+    "Food Prep":"#9F1239", "On-call":"#5A6573", "Production":"#2E7D32", "Marketing":"#8E44AD", "Distribution":"#B3541E"
   };
   function gridTaskColor(task) {
     if (GRID_TASK_COLORS[task]) return GRID_TASK_COLORS[task];
