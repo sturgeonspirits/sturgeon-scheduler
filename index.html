@@ -14,7 +14,11 @@
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   <link rel="manifest" href="/icons/site.webmanifest">
 
-  <link rel="preconnect" href="/.netlify" />
+  <!-- v3.15 2026-08-02 — preconnect needs an origin, not a path. The old
+       href="/.netlify" was a silent no-op. Warm the TLS handshake to the
+       Apps Script origin the Netlify proxy ultimately talks to. -->
+  <link rel="preconnect" href="https://script.google.com" crossorigin />
+  <link rel="dns-prefetch" href="https://script.google.com" />
 
   <title>Sturgeon Spirits — Scheduler</title>
   <style>
@@ -695,6 +699,18 @@
     return y + "-" + (m < 10 ? "0" : "") + m + "-01T12:00:00";
   }
 
+  // v3.15 2026-08-02 — One canonical cache key for the schedule fetch.
+  // renderSchedule() and maybeShowOnShift() were asking for the same week's
+  // data with differently-shaped argument objects, so the default key
+  // (action + JSON.stringify(data)) didn't match and neither the cache nor
+  // the in-flight dedupe caught it — every load fired dashSchedule twice.
+  // Keys stay prefixed with "dashSchedule" so invalidateCache() still works.
+  function schedCacheKey(mode) {
+    return mode === 'month'
+      ? "dashSchedule:month:" + localMonthISO(monthAnchor)
+      : "dashSchedule:week:" + weekStart.toISOString();
+  }
+
   async function api(action, data, { cache = false, cacheKey = null } = {}) {
     const key = cacheKey || (action + ":" + JSON.stringify(data));
     if (cache) {
@@ -771,6 +787,67 @@
     el.innerHTML = Array(count).fill('<div class="skeleton"></div>').join('');
   }
 
+  // ==========================================================================
+  // v3.15 2026-08-02 — Fast initial load
+  // Two changes: (1) one "initLoad" request replaces the old four sequential
+  // calls, and (2) the last successful payload is kept in localStorage so a
+  // returning user sees their schedule immediately while fresh data is
+  // fetched behind it (stale-while-revalidate).
+  // ==========================================================================
+  const INIT_CACHE_KEY = "SCHED_INIT_V1";
+  const INIT_CACHE_MAX_AGE = 7 * 86400000; // a week-old snapshot is still a useful first paint
+
+  function writeInitCache(payload) {
+    try {
+      localStorage.setItem(INIT_CACHE_KEY, JSON.stringify({
+        ts: Date.now(),
+        weekStartISO: weekStart.toISOString(),
+        token: sessionToken,
+        payload: payload
+      }));
+    } catch(_) { /* quota / private mode — caching is optional */ }
+  }
+
+  function readInitCache() {
+    try {
+      const raw = localStorage.getItem(INIT_CACHE_KEY);
+      if (!raw) return null;
+      const c = JSON.parse(raw);
+      // Only reuse it for the same session and the same week we're showing,
+      // otherwise the shifts on screen would be for the wrong dates.
+      if (!c || c.token !== sessionToken) return null;
+      if (c.weekStartISO !== weekStart.toISOString()) return null;
+      if (Date.now() - c.ts > INIT_CACHE_MAX_AGE) return null;
+      return c.payload;
+    } catch(_) { return null; }
+  }
+
+  function clearInitCache() {
+    try { localStorage.removeItem(INIT_CACHE_KEY); } catch(_) {}
+  }
+
+  // Fans an initLoad payload out into module state and seeds apiCache under
+  // the exact keys renderSchedule()/loadTodosSafe() will look for, so the
+  // first render costs zero extra round trips.
+  function applyInitPayload(p) {
+    bootstrap = p.bootstrap;
+    const sched = p.schedule || { shifts: [] };
+    const todos = p.todos || { items: [] };
+    const templates = p.templates || { items: [] };
+
+    globalShifts = sched.shifts || [];
+    todosCache = todos.items || [];
+    templatesCache = templates.items || [];
+
+    const now = Date.now();
+    apiCache.set(schedCacheKey('week'), { data: sched, ts: now });
+    apiCache.set("listTodos:" + JSON.stringify({ sessionToken }), { data: todos, ts: now });
+    apiCache.set("listTemplates:" + JSON.stringify({ sessionToken }), { data: templates, ts: now });
+
+    syncShiftTaskAssignees();
+    buildTaskMaps();
+  }
+
   async function init() {
     await checkUrlToken();
     if(!sessionToken) return renderLogin();
@@ -778,21 +855,50 @@
     const view = document.getElementById("view-schedule");
     document.querySelectorAll(".app-view").forEach(v => v.style.display = "none");
     view.style.display = "block";
-    showSkeleton(view, 4);
+
+    // Instant paint from the previous session, if we have one.
+    let painted = false;
+    const cached = readInitCache();
+    if (cached) {
+      try {
+        applyInitPayload(cached);
+        applyBrand();
+        renderNav();
+        render(false); // false: the cache we just seeded IS the data
+        maybeShowOnShift().catch(() => {});
+        painted = true;
+      } catch(e) {
+        console.warn("Stale init paint failed, falling back to skeleton:", e);
+        clearInitCache();
+        painted = false;
+      }
+    }
+    if (!painted) showSkeleton(view, 4);
 
     try {
-      bootstrap = await api("bootstrap", { sessionToken });
+      const payload = await api("initLoad", { sessionToken, weekStartISO: weekStart.toISOString() });
+      applyInitPayload(payload);
+      writeInitCache(payload);
       applyBrand();
       renderNav();
       startPoller();
-      render(true);
+      render(false);
       // v3.7 2026-07-19 — if opening during your own shift, land on the task
       // checklist for that shift; the calendar is one tap/swipe away.
       maybeShowOnShift().catch(() => {});
     } catch(e) {
       console.error("Bootstrap failed:", e);
+      // v3.15 2026-08-02 — only drop the saved snapshot when the session is
+      // actually invalid. A network blip must NOT wipe it, or the next
+      // offline reload loses its instant paint too.
       if (e.message.includes("Session expired") || e.message.includes("Account revoked")) {
         logout();
+      } else if (painted) {
+        // v3.15 2026-08-02 — we already have last session's schedule on
+        // screen; don't wipe it out with an error card. Flag it as stale
+        // and let them keep working.
+        updateConnStatus(false);
+        showToast("Offline — showing your last saved schedule");
       } else {
         view.innerHTML = `
           <div class="card" style="text-align:center">
@@ -858,6 +964,10 @@
   // one tap ("View Schedule") or a left-swipe away.
   // ==========================================================================
   let nowShiftId = null;
+  // v3.15 2026-08-02 — the fast path can run maybeShowOnShift twice (once on
+  // the instant cached paint, once on revalidation). If the user dismissed
+  // the screen in between, don't yank them back to it.
+  let nowShiftDismissed = false;
 
   function myCurrentShift() {
     const now = Date.now();
@@ -880,12 +990,14 @@
 
   async function maybeShowOnShift() {
     // Load this week's shifts + tasks so we can detect a live shift
-    await api("dashSchedule", { sessionToken, mode: 'week', weekStartISO: weekStart.toISOString() }, { cache: true })
+    await api("dashSchedule", { sessionToken, mode: 'week', weekStartISO: weekStart.toISOString() },
+              { cache: true, cacheKey: schedCacheKey('week') }) // v3.15 2026-08-02
       .then(d => { globalShifts = d.shifts || []; });
     await loadTodosSafe();
     syncShiftTaskAssignees();
     buildTaskMaps();
 
+    if (nowShiftDismissed) return; // v3.15 2026-08-02
     const shift = myCurrentShift();
     if (!shift) return;
     nowShiftId = shift.eventId;
@@ -1021,6 +1133,7 @@
   }
 
   window.dismissNowShift = function() {
+    nowShiftDismissed = true; // v3.15 2026-08-02
     const el = document.getElementById("nowShift");
     el.classList.add('hiding');
     setTimeout(() => { el.style.display = 'none'; el.innerHTML = ''; }, 300);
@@ -1150,7 +1263,7 @@
       mode: mode === 'month' ? 'month' : 'week',
       weekStartISO: weekStart.toISOString(),
       monthISO: localMonthISO(monthAnchor)
-    }, { cache: true });
+    }, { cache: true, cacheKey: schedCacheKey(mode) }); // v3.15 2026-08-02
 
     if (rv !== renderVersion) return;
 
@@ -2674,7 +2787,7 @@
     }
   };
 
-  function logout() { localStorage.removeItem("SCHED_SESSION"); location.reload(); }
+  function logout() { localStorage.removeItem("SCHED_SESSION"); clearInitCache(); location.reload(); } // v3.15 2026-08-02
 
   function renderNav() {
     document.getElementById("navTabs").style.display = "flex";
@@ -2778,19 +2891,25 @@
   // on the backend; undone dated tasks auto-roll forward in the display.
   // ════════════════════════════════════════════════════════════════════════
 
+  // v3.15 2026-08-02 — listTodos and listTemplates are independent, but were
+  // awaited one after the other, so every render paid two serial Apps Script
+  // round trips instead of one. Fire them together.
   async function loadTodosSafe(throwOnError, force) {
-    try {
-      if (force) invalidateCache(["listTodos"]);
-      const d = await api("listTodos", { sessionToken }, { cache: true });
-      todosCache = d.items || [];
-    } catch(e) {
+    if (force) invalidateCache(["listTodos"]);
+
+    const [todosRes, tplRes] = await Promise.allSettled([
+      api("listTodos", { sessionToken }, { cache: true }),
+      api("listTemplates", { sessionToken }, { cache: true })
+    ]);
+
+    if (todosRes.status === "fulfilled") {
+      todosCache = todosRes.value.items || [];
+    } else {
       todosCache = [];
-      if (throwOnError) throw e;
+      if (throwOnError) throw todosRes.reason;
     }
-    try {
-      const td = await api("listTemplates", { sessionToken }, { cache: true });
-      templatesCache = td.items || [];
-    } catch(_) { templatesCache = []; }
+
+    templatesCache = tplRes.status === "fulfilled" ? (tplRes.value.items || []) : [];
   }
 
   // v3.6 2026-07-19 — IDs from the sheet can come back with stray whitespace or

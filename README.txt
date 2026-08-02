@@ -95,3 +95,20 @@ role (backend v6.6 TASKS list) for the new food service. The shift modal's
 "Task" dropdown was renamed "Shift Role" to distinguish shift roles from to-do
 tasks. Food Prep has a matching color in the staffing grid. Backend redeploy
 required so the new role reaches the Shift Role dropdown.
+
+v3.15 / v6.8 2026-08-02 — Faster initial load:
+Opening the app used to make four sequential requests (bootstrap →
+dashSchedule → listTodos → listTemplates), each paying full Apps Script
+invocation overhead. Backend v6.8 adds an "initLoad" action that returns all
+four in a single response, so cold load is now one round trip instead of four.
+The app also saves that payload to localStorage and paints your schedule from
+it instantly on the next open while it revalidates in the background — so
+repeat opens feel immediate, and going offline shows your last saved schedule
+instead of a "Connection Failed" card.
+Also fixed: renderSchedule() and the on-shift screen requested the same week's
+data with differently-shaped arguments, so neither the cache nor the in-flight
+dedupe matched and dashSchedule fired twice on every load. listTodos and
+listTemplates now run in parallel instead of one after the other. The
+<link rel="preconnect"> pointed at a path ("/.netlify") rather than an origin,
+which made it a no-op; it now warms script.google.com.
+Backend redeploy required (new initLoad action).

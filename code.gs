@@ -1,5 +1,9 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v6.8 — Fast initial load: new "initLoad" action bundles bootstrap +
+ *        week schedule + todos + templates into ONE request, so the app
+ *        pays Apps Script invocation overhead once instead of four
+ *        times in series (2026-08-02)
  * v6.7 — Optional task due time: tasks can stay "open" (date only, or no
  *        date at all) or be pinned to a specific date+time (2026-07-23)
  * v6.6 — Added "Food Prep" shift role (food service launch) (2026-07-19)
@@ -294,6 +298,7 @@ function _route_(action, data) {
     case "dashRequests":  return api_dashboardRequests(data);
     case "dashAdmin":     return api_dashboardAdmin(data);
     case "bootstrap":        return api_bootstrap(data);
+    case "initLoad":         return api_initLoad(data); // v6.8 2026-08-02
     case "listWeek":         return api_listWeek(data);
     case "listMonth":        return api_listMonth(data);
     case "listOpenShifts":   return api_listOpenShifts(data);
@@ -340,6 +345,33 @@ function _route_(action, data) {
 // ============================================================================
 // 3b. COMPOSITE DASHBOARD ENDPOINTS (single call per view)
 // ============================================================================
+
+// ============================================================================
+// v6.8 2026-08-02 — SINGLE-ROUND-TRIP INITIAL LOAD
+// The app used to open with four sequential requests (bootstrap →
+// dashSchedule → listTodos → listTemplates). Each one paid the full Apps
+// Script invocation cost (script start, auth, openById) even though the
+// underlying sheet reads are cached, so load time was dominated by round
+// trips rather than work. This bundles all four into one call.
+// Todos/templates are wrapped in try/catch so a task-sheet problem can never
+// stop the schedule from loading.
+// ============================================================================
+function api_initLoad(data) {
+  const bootstrap = api_bootstrap(data);
+
+  const schedule = api_dashboardSchedule({
+    sessionToken: data.sessionToken,
+    mode: "week",
+    weekStartISO: data.weekStartISO
+  });
+
+  let todos = { items: [] };
+  let templates = { items: [] };
+  try { todos = api_listTodos(data); } catch (e) {}
+  try { templates = api_listTemplates(data); } catch (e) {}
+
+  return { bootstrap: bootstrap, schedule: schedule, todos: todos, templates: templates };
+}
 
 function api_dashboardSchedule(data) {
   const me = _requireSession_(data.sessionToken);
