@@ -135,8 +135,10 @@ untouched. Backend redeploy required.
 
 v3.18 / v7.0 2026-08-02 — Off-site work hours (Toast payroll helper):
 Staff who work away from the building can't punch in on Toast, so their hours
-had nowhere to live. New TimeLog sheet + a "Off-Site Hours" card in Profile,
-visible only to staff whose Staff-sheet "canLogHours" column is TRUE. They log
+had nowhere to live. New TimeLog sheet + an "Off-Site Hours" card on the
+Shifts tab, under My Upcoming Shifts — it's a record of work, so it sits with
+their other shift items. Visible only to staff whose Staff-sheet
+"canLogHours" column is TRUE; everyone else's Shifts tab is unchanged. They log
 a date, either start/end times or a plain duration, a category and a short
 description. Managers get an Admin > Hours tab: approve a person's week, then
 mark it entered in Toast so it can't be keyed in twice.
@@ -157,7 +159,8 @@ Two reminders, both riding the existing hourly trigger (no new trigger, no need
 to re-run Install Triggers):
   • Monday 8am CT — nudges off-site staff to log the week that just closed.
     Skipped for anyone who already submitted. Links to ?timelog=YYYY-MM-DD,
-    which opens that (already ended) week rather than the current one.
+    which opens the Shifts tab on that (already ended) week rather than the
+    current one.
   • Tuesday 8am CT — emails karl@ with everything awaiting approval, everything
     approved-but-not-yet-entered, and any late entries that landed on a week
     already marked entered (those need a manual Toast adjustment). Covers all

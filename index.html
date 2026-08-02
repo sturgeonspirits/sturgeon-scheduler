@@ -1802,6 +1802,24 @@
     }
     html += `</div>`;
 
+    // --- Off-site hours (v3.18 2026-08-02) ---
+    // Lives here rather than under Settings: it's a record of work, so it
+    // belongs with the person's other shift/work items. Only rendered for
+    // staff whose Staff-sheet canLogHours column is TRUE.
+    if (bootstrap.me.canLogHours) {
+      html += `<div class="card" id="tlCard">
+        <div class="row" style="justify-content:space-between; margin-bottom:4px">
+          <div class="h2" style="margin:0">Off-Site Hours</div>
+          <button class="btn primary small" onclick="openTimeEntry(null)">+ Log Hours</button>
+        </div>
+        <div class="muted" style="margin-bottom:12px">
+          Work done away from the building, where you can't clock in on Toast.
+          Weeks run Monday–Sunday and are rounded to the nearest quarter hour.
+        </div>
+        <div id="tlMine"><div class="muted">Loading…</div></div>
+      </div>`;
+    }
+
     // --- Existing Swap Requests section ---
     html += `<div class="card">
       <div class="h2" style="margin-bottom:4px">Swap Requests</div>
@@ -1842,6 +1860,7 @@
     html += `</div>`;
 
     el.innerHTML = html;
+    if (bootstrap.me.canLogHours) loadMyTimeLog(rv); // v3.18 2026-08-02
   }
 
   // Settings
@@ -1880,24 +1899,9 @@
         <div class="muted" style="margin-bottom:10px">Subscribe in Google, Zoho, or Apple Calendar to see your shifts automatically.</div>
         <div id="icsBox"><button class="btn small" onclick="loadIcsUrl(this)">Get My Feed Link</button></div>
       </div>
-
-      <!-- v3.18 2026-08-02 — off-site hours (only for staff flagged canLogHours) -->
-      ${me.canLogHours ? `
-      <div class="card" id="tlCard">
-        <div class="row" style="justify-content:space-between; margin-bottom:6px">
-          <div class="h2" style="margin:0">Off-Site Hours</div>
-          <button class="btn primary small" onclick="openTimeEntry(null)">+ Log Hours</button>
-        </div>
-        <div class="muted" style="margin-bottom:12px">
-          Work done away from the building, where you can't clock in on Toast.
-          Weeks run Monday–Sunday and are rounded to the nearest quarter hour.
-        </div>
-        <div id="tlMine"><div class="muted">Loading…</div></div>
-      </div>` : ""}
     `;
 
     el.innerHTML = html;
-    if (me.canLogHours) loadMyTimeLog(rv);
 
     const m = document.getElementById("sOpt");
     if(m) m.onchange = () => {
@@ -3220,7 +3224,7 @@
       subTabs.admin = "hours";
     } else if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
       if (!bootstrap.me.canLogHours) return false;
-      activeTab = "settings";
+      activeTab = "requests"; // the "Shifts" tab, where Off-Site Hours lives
       tlDeepLinkWeek = v;
     } else {
       return false;
