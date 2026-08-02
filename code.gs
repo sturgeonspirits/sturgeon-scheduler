@@ -1,5 +1,14 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v7.0 — Off-site work hours (TimeLog). Staff flagged canLogHours can log
+ *        work done away from the building, where there's no Toast punch.
+ *        Entries store exact minutes; the Mon–Sun week total is rounded
+ *        ONCE to the nearest quarter hour — that rounded number is what
+ *        gets typed into Toast payroll. Manager approves, then marks the
+ *        week entered in Toast so it can't be double-entered. Monday 8am
+ *        reminder for the week that just closed, skipped for anyone who
+ *        already submitted. Rides the existing hourly reminder trigger,
+ *        so no re-run of Install Triggers is needed (2026-08-02)
  * v6.9 — Accepting an open-to-anyone swap now warns when it lands on your
  *        own unavailability. api_acceptSwap did no conflict checking at
  *        all, so picking up a shift this way was silently allowed even
@@ -44,6 +53,20 @@ const TASKS = ["Bartender", "Bar back", "Server", "Food Prep", "On-call", "Produ
 const LOCATIONS = ["Distillery", "Tasting Room", "Ready Room", "On the Lake", "Offsite"];
 const TZ_CENTRAL = "America/Chicago";
 
+// v7.0 2026-08-02 — Off-site work categories (TimeLog). Kept separate from
+// TASKS (shift roles) because these describe work done away from the
+// building, where there is no Toast punch to capture it.
+const TIMELOG_CATEGORIES = ["Deliveries", "Distribution", "Marketing", "Events", "Production", "Errands", "Admin", "Other"];
+
+// v7.0 2026-08-02 — Toast payroll settings. Toast weeks run Monday–Sunday,
+// which already matches the app's snapToMonday() week. Hours are rounded to
+// the nearest quarter hour ONCE per week total — never per entry, or three
+// 10-minute errands would bill as 45 minutes.
+const TOAST_ROUND_MINUTES = 15;
+const TIMELOG_REMIND_HOUR = 8;        // 8am CT, for both reminders below
+const TIMELOG_STAFF_REMIND_DAY = "Mon"; // nudge staff to submit last week
+const TIMELOG_MGR_REMIND_DAY = "Tue";   // nudge Karl to enter them in Toast
+
 const BRAND = {
   name: "Sturgeon Spirits Scheduler",
   logoUrl: "https://images.squarespace-cdn.com/content/62dc41e60a5e913c4a6db575/94f06e46-8212-4a85-ae3e-4dd5d764be61/SturgeonSpiritsPrimary_Light_GreyRGB.png",
@@ -70,6 +93,7 @@ const SHEET_NOTES = "DailyNotes";
 const SHEET_LOGIN_CODES = "LoginCodes";
 const SHEET_TODOS = "Todos"; // v5.5 2026-05-26
 const SHEET_TEMPLATES = "TaskTemplates"; // v6.0 2026-07-18
+const SHEET_TIMELOG = "TimeLog"; // v7.0 2026-08-02 — off-site hours for Toast
 
 // Cache & TTL
 const STAFF_CACHE_SEC = 900;
@@ -223,7 +247,8 @@ function installTriggers() {
 
 function setupSheets() {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  _ensureSheet_(ss, SHEET_STAFF, ["email", "name", "isManager", "remindOptIn", "remind24h", "remind2h"]);
+  // v7.0 2026-08-02 — canLogHours: per-person switch for off-site hour logging
+  _ensureSheet_(ss, SHEET_STAFF, ["email", "name", "isManager", "remindOptIn", "remind24h", "remind2h", "canLogHours"]);
   _ensureSheet_(ss, SHEET_SHIFTS, ["eventId", "sourceId", "seriesId", "seriesIndex", "isSeries", "isOpen", "isOpenEnded", "staffEmail", "staffName", "task", "location", "startISO", "endISO", "startCT", "endCT", "notes", "createdBy", "createdAtISO", "updatedAtISO"]);
   _ensureSheet_(ss, SHEET_LOGIN_CODES, ["token", "email", "expiresAtISO", "usedAtISO"]);
   _ensureSheet_(ss, SHEET_SESS, ["sessionToken", "email", "createdAtISO", "expiresAtISO", "lastSeenAtISO"]);
@@ -235,6 +260,9 @@ function setupSheets() {
   // v6.0 2026-07-18 — Todos gains date/shiftId/assignedTo/proofValue/templateId; TaskTemplates added
   _ensureSheet_(ss, SHEET_TODOS, ["id", "text", "category", "done", "addedBy", "addedAt", "doneBy", "doneAt", "date", "shiftId", "assignedTo", "proofValue", "templateId", "priority", "time"]); // v6.7 2026-07-23 — optional due time
   _ensureSheet_(ss, SHEET_TEMPLATES, ["id", "text", "category", "recurrence", "targetDuty", "requireProof", "active", "priority"]);
+  // v7.0 2026-08-02 — TimeLog. minutes is the EXACT worked figure; rounding to
+  // the quarter hour happens on the week total at read time, never here.
+  _ensureSheet_(ss, SHEET_TIMELOG, ["id", "staffEmail", "staffName", "workDate", "weekStart", "startTime", "endTime", "minutes", "category", "description", "status", "submittedAtISO", "updatedAtISO", "approvedBy", "approvedAtISO", "toastEnteredBy", "toastEnteredAtISO"]);
   _invalidateAllCaches_();
   SpreadsheetApp.getUi().alert("Sheets initialized (with Central Time + Task columns).");
 }
@@ -344,6 +372,13 @@ function _route_(action, data) {
     case "listTemplates":    return api_listTemplates(data);
     case "saveTemplate":     return api_saveTemplate(data);
     case "deleteTemplate":   return api_deleteTemplate(data);
+    // v7.0 2026-08-02 — Off-site work hours (TimeLog)
+    case "listTimeEntries":  return api_listTimeEntries(data);
+    case "saveTimeEntry":    return api_saveTimeEntry(data);
+    case "deleteTimeEntry":  return api_deleteTimeEntry(data);
+    case "timeLogWeeks":     return api_timeLogWeeks(data);
+    case "approveTimeEntries":   return api_approveTimeEntries(data);
+    case "markWeekEnteredInToast": return api_markWeekEnteredInToast(data);
     default: throw new Error("Unknown action: " + action);
   }
 }
@@ -664,7 +699,8 @@ function _requireSession_(token) {
   const staff = _staffIndex_().find(s => s.email === email);
   if (!staff) throw new Error("Account revoked");
 
-  const me = { email, name: staff.name, isManager: !!staff.isManager, remindOptIn: !!staff.remindOptIn, remind24h: staff.remind24h !== false, remind2h: staff.remind2h !== false };
+  // v7.0 2026-08-02 — canLogHours gates the off-site hours UI (Profile tab)
+  const me = { email, name: staff.name, isManager: !!staff.isManager, remindOptIn: !!staff.remindOptIn, remind24h: staff.remind24h !== false, remind2h: staff.remind2h !== false, canLogHours: !!staff.canLogHours };
 
   if (!cache.get("seen_" + token)) {
     cache.put("seen_" + token, "1", 1800);
@@ -677,7 +713,8 @@ function _requireSession_(token) {
 
 function api_bootstrap(data) {
   const me = _requireSession_(data.sessionToken);
-  return { me, brand: BRAND, tasks: TASKS, locations: LOCATIONS, staff: _staffIndex_().map(s => ({ email: s.email, name: s.name, isManager: s.isManager })) };
+  // v7.0 2026-08-02 — timelogCategories + canLogHours for the off-site hours UI
+  return { me, brand: BRAND, tasks: TASKS, locations: LOCATIONS, timelogCategories: TIMELOG_CATEGORIES, staff: _staffIndex_().map(s => ({ email: s.email, name: s.name, isManager: s.isManager, canLogHours: s.canLogHours })) };
 }
 
 function _fmtShiftForEmail_(shift) {
@@ -1375,6 +1412,13 @@ function sendShiftReminders() {
     if (prefs.remind24h && diffMin > 1380 && diffMin < 1500) _sendReminder(s, "24h", sentKeys);
     if (prefs.remind2h && diffMin > 60 && diffMin < 180) _sendReminder(s, "2h", sentKeys);
   });
+
+  // v7.0 2026-08-02 — Off-site hour reminders piggyback on this hourly run so
+  // no new trigger is needed (and so an existing install doesn't have to
+  // re-run Install Triggers). Each is a no-op outside its own day/hour, and
+  // wrapped so a mail failure can't stop shift reminders.
+  try { sendTimeLogStaffReminders(now); } catch (_) {}
+  try { sendTimeLogManagerReminder(now); } catch (_) {}
 }
 
 function _sendReminder(shift, kind, sentKeys) {
@@ -2118,6 +2162,446 @@ function _templateMatchesDay_(recurrence, dow, dom) {
 // 9. HELPERS
 // ============================================================================
 
+// ============================================================================
+// v7.0 2026-08-02 — OFF-SITE WORK HOURS (TimeLog)
+//
+// Why this is its own sheet rather than rows in Shifts: everything that reads
+// Shifts would otherwise pick these up — calendar events, the staffing grid,
+// shift reminders, the swap board, the open-shift claim flow, and the hourly
+// task rollover. An off-site hour entry is a record of work already done, not
+// a shift, so it stays out of all of that.
+//
+// It also stays out of api_weekSummary / api_monthSummary. Those report
+// SCHEDULED hours and always have; Toast is the source of truth for payroll.
+// Blending self-reported hours into them would produce a payroll-looking
+// number that isn't one.
+//
+// Rounding: entries store exact minutes. The Mon–Sun week total is rounded
+// once, to the nearest quarter hour. Rounding per entry instead would turn
+// three separate 10-minute errands into 45 billable minutes.
+// ============================================================================
+
+// Calendar-date math done on "yyyy-MM-dd" strings via UTC noon, so it can't be
+// shifted by DST or by the server's timezone.
+function _dateKeyToUTC_(dateKey) {
+  const p = String(dateKey || "").trim().split("-");
+  if (p.length !== 3) throw new Error("Bad date: " + dateKey);
+  const d = new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]), 12, 0, 0));
+  if (isNaN(d.getTime())) throw new Error("Bad date: " + dateKey);
+  return d;
+}
+
+function _utcToDateKey_(d) {
+  const mm = d.getUTCMonth() + 1, dd = d.getUTCDate();
+  return d.getUTCFullYear() + "-" + (mm < 10 ? "0" : "") + mm + "-" + (dd < 10 ? "0" : "") + dd;
+}
+
+// Monday that starts the Toast week containing dateKey. Matches the app's
+// snapToMonday() in index.html, and Toast's Monday–Sunday payroll week.
+function _weekStartOf_(dateKey) {
+  const d = _dateKeyToUTC_(dateKey);
+  const dow = d.getUTCDay();            // 0=Sun, 1=Mon ... 6=Sat
+  const back = dow === 0 ? 6 : dow - 1; // Sunday belongs to the week that began 6 days earlier
+  d.setUTCDate(d.getUTCDate() - back);
+  return _utcToDateKey_(d);
+}
+
+function _weekLabel_(weekStartKey) {
+  const s = _dateKeyToUTC_(weekStartKey);
+  const e = _dateKeyToUTC_(weekStartKey);
+  e.setUTCDate(e.getUTCDate() + 6);
+  const f = (d, pat) => Utilities.formatDate(d, "UTC", pat);
+  return f(s, "MMM d") + " – " + f(e, "MMM d, yyyy");
+}
+
+// Exact minutes -> hours rounded to the nearest quarter. This is the number
+// that gets typed into Toast.
+function _toastHours_(totalMinutes) {
+  const r = Math.round(Number(totalMinutes || 0) / TOAST_ROUND_MINUTES) * TOAST_ROUND_MINUTES;
+  return Math.round((r / 60) * 100) / 100;
+}
+
+function _fmtExact_(totalMinutes) {
+  const m = Math.max(0, Math.round(Number(totalMinutes || 0)));
+  const h = Math.floor(m / 60), rem = m % 60;
+  if (!h) return rem + "m";
+  return rem ? h + "h " + rem + "m" : h + "h";
+}
+
+function _parseHHMM_(s) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || "").trim());
+  if (!m) return null;
+  const h = Number(m[1]), mi = Number(m[2]);
+  if (h < 0 || h > 23 || mi < 0 || mi > 59) return null;
+  return h * 60 + mi;
+}
+
+// Creates the TimeLog sheet (and the Staff.canLogHours column) on first use,
+// so this ships without anyone having to run Setup Sheets from the menu.
+let _timeLogEnsured_ = false;
+function _ensureTimeLogSchema_() {
+  if (_timeLogEnsured_) return;
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  _ensureSheet_(ss, SHEET_TIMELOG, ["id", "staffEmail", "staffName", "workDate", "weekStart", "startTime", "endTime", "minutes", "category", "description", "status", "submittedAtISO", "updatedAtISO", "approvedBy", "approvedAtISO", "toastEnteredBy", "toastEnteredAtISO"]);
+  _ensureSheet_(ss, SHEET_STAFF, ["email", "name", "isManager", "remindOptIn", "remind24h", "remind2h", "canLogHours"]);
+  _timeLogEnsured_ = true;
+}
+
+function _getTimeLogCached_() {
+  const cache = CacheService.getScriptCache();
+  const hit = _cacheGetLarge_(cache, "timeLogAll");
+  if (hit) return JSON.parse(hit);
+  _ensureTimeLogSchema_();
+  const r = _readAll_(SHEET_TIMELOG);
+  _cachePutLarge_(cache, "timeLogAll", JSON.stringify(r), SHIFTS_CACHE_SEC);
+  return r;
+}
+
+function _invalidateTimeLogCache_() {
+  try { _cacheClearLarge_(CacheService.getScriptCache(), "timeLogAll"); } catch (_) {}
+}
+
+function _cleanTimeEntry_(r) {
+  const minutes = Number(r.minutes || 0);
+  return {
+    id: String(r.id),
+    staffEmail: _normEmail_(r.staffEmail),
+    staffName: r.staffName || r.staffEmail,
+    workDate: String(r.workDate || "").trim(),
+    weekStart: String(r.weekStart || "").trim(),
+    startTime: String(r.startTime || "").trim(),
+    endTime: String(r.endTime || "").trim(),
+    minutes: minutes,
+    exactLabel: _fmtExact_(minutes),
+    category: String(r.category || "").trim(),
+    description: String(r.description || "").trim(),
+    status: String(r.status || "submitted").trim(),
+    submittedAtISO: r.submittedAtISO || "",
+    approvedBy: r.approvedBy || "",
+    approvedAtISO: r.approvedAtISO || "",
+    toastEnteredBy: r.toastEnteredBy || "",
+    toastEnteredAtISO: r.toastEnteredAtISO || ""
+  };
+}
+
+// Groups entries into Monday–Sunday weeks and computes the Toast figure.
+// A week is "entered" only once every approved entry in it is marked; an entry
+// added after that shows up as a late entry so it can't quietly ride along on
+// a week that's already been keyed into payroll.
+function _timeLogWeeks_(entries) {
+  const byKey = {};
+  entries.forEach(e => {
+    const k = e.weekStart + "|" + e.staffEmail;
+    if (!byKey[k]) {
+      byKey[k] = {
+        key: k, weekStart: e.weekStart, weekLabel: _weekLabel_(e.weekStart),
+        staffEmail: e.staffEmail, staffName: e.staffName,
+        entries: [], minutes: 0, pendingCount: 0, approvedCount: 0,
+        enteredCount: 0, lateCount: 0
+      };
+    }
+    const w = byKey[k];
+    w.entries.push(e);
+    w.minutes += e.minutes;
+    if (e.status === "approved") w.approvedCount++; else w.pendingCount++;
+    if (e.toastEnteredAtISO) w.enteredCount++;
+  });
+
+  return Object.keys(byKey).map(k => {
+    const w = byKey[k];
+    w.entries.sort((a, b) => a.workDate < b.workDate ? -1 : a.workDate > b.workDate ? 1 : 0);
+    w.toastHours = _toastHours_(w.minutes);
+    w.exactLabel = _fmtExact_(w.minutes);
+    w.allApproved = w.pendingCount === 0 && w.approvedCount > 0;
+    w.enteredInToast = w.enteredCount > 0 && w.enteredCount === w.entries.length;
+    // Some (not all) marked = entries landed after the week was keyed in.
+    w.lateCount = w.enteredCount > 0 && w.enteredCount < w.entries.length
+      ? w.entries.length - w.enteredCount : 0;
+    w.needsEntry = w.allApproved && !w.enteredInToast;
+    return w;
+  }).sort((a, b) => a.weekStart < b.weekStart ? 1 : a.weekStart > b.weekStart ? -1 : (a.staffName > b.staffName ? 1 : -1));
+}
+
+function _canLogHours_(me) {
+  if (me.isManager) return true;
+  const s = _staffIndex_().find(x => x.email === me.email);
+  return !!(s && s.canLogHours);
+}
+
+// ---- API ------------------------------------------------------------------
+
+// Staff see only their own. Managers see everyone, or one person via staffEmail.
+function api_listTimeEntries(data) {
+  const me = _requireSession_(data.sessionToken);
+  const all = _getTimeLogCached_().filter(r => r && r.id).map(_cleanTimeEntry_);
+
+  let rows;
+  if (me.isManager) {
+    const who = data.staffEmail ? _normEmail_(data.staffEmail) : "";
+    rows = who ? all.filter(r => r.staffEmail === who) : all;
+  } else {
+    rows = all.filter(r => r.staffEmail === me.email);
+  }
+
+  if (data.weekStartISO) {
+    const wk = _weekStartOf_(String(data.weekStartISO).slice(0, 10));
+    rows = rows.filter(r => r.weekStart === wk);
+  }
+
+  return {
+    items: rows,
+    weeks: _timeLogWeeks_(rows),
+    canLogHours: _canLogHours_(me),
+    categories: TIMELOG_CATEGORIES
+  };
+}
+
+function api_saveTimeEntry(data) {
+  const me = _requireSession_(data.sessionToken);
+  if (!_canLogHours_(me)) throw new Error("Not enabled for hour logging");
+
+  _ensureTimeLogSchema_();
+
+  const target = (me.isManager && data.staffEmail) ? _normEmail_(data.staffEmail) : me.email;
+  if (target !== me.email && !me.isManager) throw new Error("Denied");
+
+  const workDate = String(data.workDate || "").trim();
+  if (!workDate) throw new Error("Pick the date the work happened");
+  const weekStart = _weekStartOf_(workDate); // by work date, not submission date
+
+  // Either a start/end pair or a plain duration. Start/end wins if both given.
+  const startTime = String(data.startTime || "").trim();
+  const endTime = String(data.endTime || "").trim();
+  let minutes;
+  if (startTime && endTime) {
+    const s = _parseHHMM_(startTime), e = _parseHHMM_(endTime);
+    if (s === null || e === null) throw new Error("Times must look like 14:30");
+    if (e <= s) throw new Error("End time must be after start time");
+    minutes = e - s;
+  } else {
+    minutes = Math.round(Number(data.minutes || 0));
+    if (!minutes || minutes <= 0) throw new Error("Enter how long the work took");
+  }
+  if (minutes > 16 * 60) throw new Error("That's over 16 hours — split it across days");
+
+  const category = String(data.category || "Other").trim();
+  const description = String(data.description || "").trim();
+  if (!description) throw new Error("Add a short description of the work");
+
+  const nowISO = new Date().toISOString();
+
+  if (data.id) {
+    const existing = _getTimeLogCached_().map(_cleanTimeEntry_).find(r => r.id === String(data.id));
+    if (!existing) throw new Error("Entry not found");
+    if (existing.staffEmail !== me.email && !me.isManager) throw new Error("Denied");
+    // Once approved it's payroll evidence — only a manager may still touch it.
+    if (existing.status === "approved" && !me.isManager) {
+      throw new Error("That entry is approved. Ask a manager to change it.");
+    }
+    _updateWhere_(SHEET_TIMELOG, "id", existing.id, {
+      workDate, weekStart, startTime, endTime, minutes,
+      category, description, updatedAtISO: nowISO
+    });
+    _invalidateTimeLogCache_();
+    return { ok: true, id: existing.id, weekStart };
+  }
+
+  const staff = _staffIndex_().find(s => s.email === target);
+  const id = _uuid_();
+  _appendRow_(SHEET_TIMELOG, {
+    id,
+    staffEmail: target,
+    staffName: (staff && staff.name) || target,
+    workDate, weekStart, startTime, endTime, minutes,
+    category, description,
+    status: "submitted",
+    submittedAtISO: nowISO,
+    updatedAtISO: nowISO,
+    approvedBy: "", approvedAtISO: "", toastEnteredBy: "", toastEnteredAtISO: ""
+  });
+  _invalidateTimeLogCache_();
+  return { ok: true, id, weekStart };
+}
+
+function api_deleteTimeEntry(data) {
+  const me = _requireSession_(data.sessionToken);
+  const existing = _getTimeLogCached_().map(_cleanTimeEntry_).find(r => r.id === String(data.id));
+  if (!existing) throw new Error("Entry not found");
+  if (existing.staffEmail !== me.email && !me.isManager) throw new Error("Denied");
+  if (existing.status === "approved" && !me.isManager) {
+    throw new Error("That entry is approved. Ask a manager to remove it.");
+  }
+  if (existing.toastEnteredAtISO && !me.isManager) throw new Error("Already entered in Toast");
+  _deleteWhere_(SHEET_TIMELOG, "id", existing.id);
+  _invalidateTimeLogCache_();
+  return { ok: true };
+}
+
+// Manager review board: every week with anything outstanding, newest first.
+function api_timeLogWeeks(data) {
+  const me = _requireSession_(data.sessionToken);
+  if (!me.isManager) throw new Error("Managers only");
+  const all = _getTimeLogCached_().filter(r => r && r.id).map(_cleanTimeEntry_);
+  const weeks = _timeLogWeeks_(all);
+  return {
+    weeks,
+    openWeeks: weeks.filter(w => w.pendingCount > 0 || w.needsEntry || w.lateCount > 0).length
+  };
+}
+
+function api_approveTimeEntries(data) {
+  const me = _requireSession_(data.sessionToken);
+  if (!me.isManager) throw new Error("Managers only");
+
+  let ids = Array.isArray(data.ids) ? data.ids.map(String) : [];
+  if (!ids.length && data.weekStart && data.staffEmail) {
+    const who = _normEmail_(data.staffEmail);
+    const wk = String(data.weekStart).trim();
+    ids = _getTimeLogCached_().map(_cleanTimeEntry_)
+      .filter(r => r.weekStart === wk && r.staffEmail === who && r.status !== "approved")
+      .map(r => r.id);
+  }
+  if (!ids.length) return { ok: true, approved: 0 };
+
+  const nowISO = new Date().toISOString();
+  let n = 0;
+  ids.forEach(id => {
+    n += _updateWhere_(SHEET_TIMELOG, "id", id, {
+      status: "approved", approvedBy: me.name || me.email, approvedAtISO: nowISO
+    });
+  });
+  _invalidateTimeLogCache_();
+  return { ok: true, approved: n };
+}
+
+// Marks a person's week as keyed into Toast (or clears the mark). Only
+// approved entries get marked — anything still pending stays visible as
+// outstanding rather than being silently swept up.
+function api_markWeekEnteredInToast(data) {
+  const me = _requireSession_(data.sessionToken);
+  if (!me.isManager) throw new Error("Managers only");
+
+  const wk = String(data.weekStart || "").trim();
+  const who = _normEmail_(data.staffEmail);
+  if (!wk || !who) throw new Error("Missing week or staff member");
+  const entered = data.entered !== false;
+
+  const rows = _getTimeLogCached_().map(_cleanTimeEntry_)
+    .filter(r => r.weekStart === wk && r.staffEmail === who && (!entered || r.status === "approved"));
+  if (!rows.length) throw new Error(entered ? "Approve the entries first" : "Nothing to unmark");
+
+  const nowISO = new Date().toISOString();
+  let n = 0;
+  rows.forEach(r => {
+    n += _updateWhere_(SHEET_TIMELOG, "id", r.id, {
+      toastEnteredBy: entered ? (me.name || me.email) : "",
+      toastEnteredAtISO: entered ? nowISO : ""
+    });
+  });
+  _invalidateTimeLogCache_();
+  return { ok: true, updated: n };
+}
+
+// ---- Reminders ------------------------------------------------------------
+// Both ride the existing hourly sendShiftReminders trigger, so no new trigger
+// and no need to re-run Install Triggers. ReminderLog de-dupes them the same
+// way it de-dupes shift reminders, keyed by the week rather than an eventId.
+
+function _timeLogRemindOnce_(key, kind, sentTo, send) {
+  const log = _readAll_(SHEET_REMIND_LOG);
+  const k = key + "|" + kind + "|" + _normEmail_(sentTo);
+  if (log.some(r => (r.eventId + "|" + r.kind + "|" + _normEmail_(r.sentTo)) === k)) return false;
+  try {
+    send();
+    _appendRow_(SHEET_REMIND_LOG, {
+      id: _uuid_(), eventId: key, kind, sentTo, sentAtISO: new Date().toISOString()
+    });
+    return true;
+  } catch (_) { return false; }
+}
+
+// Monday ~8am CT: nudge off-site staff to log the week that just closed.
+// Anyone who already submitted for that week is skipped — a reminder to do
+// something you've already done is how people learn to ignore reminders.
+function sendTimeLogStaffReminders(now) {
+  now = now || new Date();
+  if (Utilities.formatDate(now, TZ_CENTRAL, "EEE") !== TIMELOG_STAFF_REMIND_DAY) return;
+  if (Number(Utilities.formatDate(now, TZ_CENTRAL, "H")) !== TIMELOG_REMIND_HOUR) return;
+
+  // The week that ended yesterday (Sunday), not the one starting today.
+  const today = Utilities.formatDate(now, TZ_CENTRAL, "yyyy-MM-dd");
+  const prev = _dateKeyToUTC_(today);
+  prev.setUTCDate(prev.getUTCDate() - 7);
+  const wk = _weekStartOf_(_utcToDateKey_(prev));
+  const label = _weekLabel_(wk);
+
+  const entries = _getTimeLogCached_().map(_cleanTimeEntry_).filter(r => r.weekStart === wk);
+
+  _staffIndex_().filter(s => s.canLogHours).forEach(s => {
+    if (entries.some(e => e.staffEmail === s.email)) return; // already submitted
+    _timeLogRemindOnce_("TIMELOG_" + wk, "timelogStaff", s.email, function () {
+      MailApp.sendEmail({
+        to: s.email,
+        subject: EMAIL_SETTINGS.staffNotifySubjectPrefix + " Log your off-site hours for " + label,
+        htmlBody:
+          "<p>Hi " + (s.name || "") + ",</p>" +
+          "<p>Last week (<b>" + label + "</b>) is closed and you haven't logged any off-site hours for it yet.</p>" +
+          "<p><a href=\"" + SITE_URL + "?timelog=" + wk + "\">Log your hours</a> — the link opens that week directly.</p>" +
+          "<p>Hours are rounded to the nearest quarter hour when they go into payroll.</p>",
+        name: EMAIL_SETTINGS.fromName,
+        replyTo: EMAIL_SETTINGS.replyTo
+      });
+    });
+  });
+}
+
+// Tuesday ~8am CT: tell Karl what's waiting to go into Toast. Deliberately
+// covers ALL weeks, not just last one — an old unentered week is exactly the
+// thing that slips, and it won't resurface on its own.
+function sendTimeLogManagerReminder(now) {
+  now = now || new Date();
+  if (Utilities.formatDate(now, TZ_CENTRAL, "EEE") !== TIMELOG_MGR_REMIND_DAY) return;
+  if (Number(Utilities.formatDate(now, TZ_CENTRAL, "H")) !== TIMELOG_REMIND_HOUR) return;
+
+  const all = _getTimeLogCached_().filter(r => r && r.id).map(_cleanTimeEntry_);
+  const weeks = _timeLogWeeks_(all);
+  const needsEntry = weeks.filter(w => w.needsEntry);
+  const needsApproval = weeks.filter(w => w.pendingCount > 0);
+  const late = weeks.filter(w => w.lateCount > 0);
+  if (!needsEntry.length && !needsApproval.length && !late.length) return; // silent when clear
+
+  const today = Utilities.formatDate(now, TZ_CENTRAL, "yyyy-MM-dd");
+  const row = w => "<li><b>" + w.staffName + "</b> — " + w.weekLabel +
+    ": <b>" + w.toastHours.toFixed(2) + " h</b> <span style=\"color:#5A6573\">(" + w.exactLabel + " exact)</span></li>";
+
+  let html = "<p>Off-site hours waiting on you:</p>";
+  if (needsEntry.length) {
+    html += "<p><b>Ready to enter in Toast</b> (approved, not yet entered):</p><ul>" +
+      needsEntry.map(row).join("") + "</ul>";
+  }
+  if (needsApproval.length) {
+    html += "<p><b>Waiting for your approval</b>:</p><ul>" +
+      needsApproval.map(w => "<li><b>" + w.staffName + "</b> — " + w.weekLabel + ": " +
+        w.pendingCount + " entr" + (w.pendingCount === 1 ? "y" : "ies") + "</li>").join("") + "</ul>";
+  }
+  if (late.length) {
+    html += "<p><b>Late entries on an already-entered week</b> — these need a Toast adjustment:</p><ul>" +
+      late.map(w => "<li><b>" + w.staffName + "</b> — " + w.weekLabel + ": " +
+        w.lateCount + " new entr" + (w.lateCount === 1 ? "y" : "ies") + "</li>").join("") + "</ul>";
+  }
+  html += "<p>Hours shown are already rounded to the quarter hour — type them into Toast as-is.</p>" +
+    "<p><a href=\"" + SITE_URL + "?timelog=review\">Open the review screen</a></p>";
+
+  _timeLogRemindOnce_("TIMELOG_MGR_" + today, "timelogMgr", EMAIL_SETTINGS.managerEmail, function () {
+    MailApp.sendEmail({
+      to: EMAIL_SETTINGS.managerEmail,
+      subject: EMAIL_SETTINGS.managerNotifySubjectPrefix + " Off-site hours to enter in Toast",
+      htmlBody: html,
+      name: EMAIL_SETTINGS.fromName
+    });
+  });
+}
+
 function _cleanShift_(r, isManager) {
   return { eventId: r.eventId, task: r.task, location: r.location, startISO: r.startISO, endISO: r.endISO, staffEmail: r.staffEmail, staffName: r.staffName, notes: isManager ? (r.notes || "") : "", isOpen: _asBool_(r.isOpen), isOpenEnded: _asBool_(r.isOpenEnded), isSeries: _asBool_(r.isSeries), openShiftId: r.eventId };
 }
@@ -2301,7 +2785,8 @@ function _staffIndex_() {
 
   const s = _readAll_(SHEET_STAFF).map(r => ({
     email: _normEmail_(r.email), name: r.name, isManager: _asBool_(r.isManager),
-    remindOptIn: _asBool_(r.remindOptIn), remind24h: r.remind24h !== false, remind2h: r.remind2h !== false
+    remindOptIn: _asBool_(r.remindOptIn), remind24h: r.remind24h !== false, remind2h: r.remind2h !== false,
+    canLogHours: _asBool_(r.canLogHours) // v7.0 2026-08-02
   }));
 
   _cachePutLarge_(cache, "staffIndex", JSON.stringify(s), STAFF_CACHE_SEC);
@@ -2331,6 +2816,7 @@ function _invalidateAllCaches_() {
   _cacheClearLarge_(c, "shiftsAll");
   _cacheClearLarge_(c, "staffIndex");
   _cacheClearLarge_(c, "availAll");
+  _cacheClearLarge_(c, "timeLogAll"); // v7.0 2026-08-02
 }
 
 function _invalidateShiftsCache_() {

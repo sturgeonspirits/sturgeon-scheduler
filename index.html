@@ -134,6 +134,18 @@
     .day-col { background:#fff; border:1px solid var(--border); border-radius:8px; padding:8px; min-width:140px; }
     .day-head { font-size:12px; font-weight:800; color:var(--muted); margin-bottom:8px; text-align:center; }
     .chip { background:#f4f4f4; padding:6px; border-radius:6px; margin-bottom:6px; font-size:11px; }
+    /* v3.18 2026-08-02 — off-site hours */
+    .tl-week { border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:10px; }
+    .tl-week-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+    .tl-toast { font-weight:800; font-size:18px; color:var(--primary); white-space:nowrap; }
+    .tl-toast small { display:block; font-weight:600; font-size:10px; color:var(--muted); text-align:right; }
+    .tl-status { font-size:10px; font-weight:800; padding:2px 6px; border-radius:4px; text-transform:uppercase; }
+    .tl-status.pending  { background:#e8a030; color:#fff; }
+    .tl-status.approved { background:var(--primary); color:#fff; }
+    .tl-status.entered  { background:#2e7d52; color:#fff; }
+    .tl-status.late     { background:#c0392b; color:#fff; }
+    .tl-entry { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-top:1px solid var(--border); font-size:13px; }
+    .tl-entry:first-of-type { border-top:none; }
 
     .modal-back { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:50; display:none; align-items:end; justify-content:center; }
     .modal { background:#fff; width:100%; max-width:600px; border-radius:20px 20px 0 0; padding:20px; max-height:90vh; overflow-y:auto; animation:slideUp 0.3s ease; }
@@ -507,6 +519,40 @@
     <div class="row" style="margin-top:16px">
       <button class="btn danger" id="btnDelTask" style="display:none; flex:1">Delete</button>
       <button class="btn primary" id="btnSaveTask" style="flex:2">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- v3.18 2026-08-02 — off-site work hours entry -->
+<div class="modal-back" id="mTimeEntry" onclick="if(event.target===this)closeModals()">
+  <div class="modal">
+    <div class="row" style="justify-content:space-between; margin-bottom:16px;">
+      <div class="h2" id="mTimeTitle" style="margin:0">Log Off-Site Hours</div>
+      <button class="btn small" onclick="closeModals()">Close</button>
+    </div>
+    <label>Date of the work</label><input type="date" id="tlDate">
+    <div class="segmented" style="margin:12px 0 4px;">
+      <button class="seg-btn" id="tlModeRange" onclick="setTimeEntryMode('range')">Start &amp; end</button>
+      <button class="seg-btn" id="tlModeDur" onclick="setTimeEntryMode('duration')">Just how long</button>
+    </div>
+    <div id="tlRangeBox">
+      <div class="row" style="gap:10px;">
+        <div style="flex:1"><label>Start</label><input type="time" id="tlStart"></div>
+        <div style="flex:1"><label>End</label><input type="time" id="tlEnd"></div>
+      </div>
+    </div>
+    <div id="tlDurBox" style="display:none">
+      <div class="row" style="gap:10px;">
+        <div style="flex:1"><label>Hours</label><input type="number" id="tlHours" min="0" max="16" step="1" placeholder="0"></div>
+        <div style="flex:1"><label>Minutes</label><input type="number" id="tlMins" min="0" max="59" step="5" placeholder="0"></div>
+      </div>
+    </div>
+    <div class="muted" id="tlRounded" style="margin:8px 0 4px;"></div>
+    <label>Type of work</label><select id="tlCat"></select>
+    <label>What did you do?</label><input type="text" id="tlDesc" placeholder="e.g. Delivery run to Green Bay accounts">
+    <div class="row" style="margin-top:16px">
+      <button class="btn danger" id="btnDelTimeEntry" style="display:none; flex:1">Delete</button>
+      <button class="btn primary" id="btnSaveTimeEntry" style="flex:2">Save</button>
     </div>
   </div>
 </div>
@@ -901,10 +947,14 @@
       applyBrand();
       renderNav();
       startPoller();
+      // v3.18 2026-08-02 — ?timelog= deep links from the reminder emails. Must
+      // run before render() so the right tab paints, and before
+      // maybeShowOnShift(), which would otherwise hijack the landing screen.
+      const deepLinked = applyTimeLogDeepLink();
       render(false);
       // v3.7 2026-07-19 — if opening during your own shift, land on the task
       // checklist for that shift; the calendar is one tap/swipe away.
-      maybeShowOnShift().catch(() => {});
+      if (!deepLinked) maybeShowOnShift().catch(() => {});
     } catch(e) {
       console.error("Bootstrap failed:", e);
       // v3.15 2026-08-02 — only drop the saved snapshot when the session is
@@ -1830,9 +1880,24 @@
         <div class="muted" style="margin-bottom:10px">Subscribe in Google, Zoho, or Apple Calendar to see your shifts automatically.</div>
         <div id="icsBox"><button class="btn small" onclick="loadIcsUrl(this)">Get My Feed Link</button></div>
       </div>
+
+      <!-- v3.18 2026-08-02 — off-site hours (only for staff flagged canLogHours) -->
+      ${me.canLogHours ? `
+      <div class="card" id="tlCard">
+        <div class="row" style="justify-content:space-between; margin-bottom:6px">
+          <div class="h2" style="margin:0">Off-Site Hours</div>
+          <button class="btn primary small" onclick="openTimeEntry(null)">+ Log Hours</button>
+        </div>
+        <div class="muted" style="margin-bottom:12px">
+          Work done away from the building, where you can't clock in on Toast.
+          Weeks run Monday–Sunday and are rounded to the nearest quarter hour.
+        </div>
+        <div id="tlMine"><div class="muted">Loading…</div></div>
+      </div>` : ""}
     `;
 
     el.innerHTML = html;
+    if (me.canLogHours) loadMyTimeLog(rv);
 
     const m = document.getElementById("sOpt");
     if(m) m.onchange = () => {
@@ -1850,7 +1915,25 @@
       <button class="seg-btn ${sub==='tools'?'active':''}" onclick="setSub('admin','tools')">Tools</button>
       <button class="seg-btn ${sub==='chart'?'active':''}" onclick="setSub('admin','chart')">Chart</button>
       <button class="seg-btn ${sub==='summary'?'active':''}" onclick="setSub('admin','summary')">Summary</button>
+      <button class="seg-btn ${sub==='hours'?'active':''}" onclick="setSub('admin','hours')">Hours</button>
     </div>`;
+
+    // v3.18 2026-08-02 — off-site hours review (approve → enter in Toast)
+    if (sub === 'hours') {
+      html += `
+        <div class="card">
+          <div class="h2">Off-Site Hours</div>
+          <div class="muted" style="margin-bottom:12px">
+            Hours worked away from the building, where there's no Toast punch.
+            Approve them, type the bold quarter-hour figure into Toast payroll,
+            then mark the week entered so it can't be keyed in twice.
+          </div>
+          <div id="tlReview"><div class="muted">Loading…</div></div>
+        </div>`;
+      el.innerHTML = html;
+      renderTimeLogReview(rv);
+      return;
+    }
 
     if (sub === 'tools') {
       const dashData = await api("dashAdmin", { sessionToken }, { cache: true });
@@ -2174,6 +2257,286 @@
   });
 
   function setSub(tab, val) { subTabs[tab] = val; showViewLoading(); render(); }
+
+  // ==========================================================================
+  // v3.18 2026-08-02 — OFF-SITE WORK HOURS
+  // Staff with canLogHours record work done away from the building, where
+  // there's no Toast punch. Entries hold exact minutes; the Mon–Sun week total
+  // is rounded ONCE to the nearest quarter hour, and that rounded figure is
+  // what gets typed into Toast. Kept entirely out of the schedule views —
+  // these are records of completed work, not shifts.
+  // ==========================================================================
+  let timeEntryEditId = null;
+  let timeEntryMode = "range";
+  let tlDeepLinkWeek = null;
+
+  function fmtExactMins(mins) {
+    const m = Math.max(0, Math.round(Number(mins) || 0));
+    const h = Math.floor(m / 60), rem = m % 60;
+    if (!h) return rem + "m";
+    return rem ? h + "h " + rem + "m" : h + "h";
+  }
+
+  // Mirrors _toastHours_ in code.gs — nearest quarter hour, on the total only.
+  function toastHours(mins) {
+    return Math.round((Math.round((Number(mins) || 0) / 15) * 15 / 60) * 100) / 100;
+  }
+
+  function currentEntryMinutes() {
+    if (timeEntryMode === "range") {
+      const s = document.getElementById("tlStart").value;
+      const e = document.getElementById("tlEnd").value;
+      if (!s || !e) return 0;
+      const [sh, sm] = s.split(":").map(Number);
+      const [eh, em] = e.split(":").map(Number);
+      const d = (eh * 60 + em) - (sh * 60 + sm);
+      return d > 0 ? d : 0;
+    }
+    const h = Number(document.getElementById("tlHours").value || 0);
+    const m = Number(document.getElementById("tlMins").value || 0);
+    return Math.max(0, Math.round(h * 60 + m));
+  }
+
+  // Live preview so the quarter-hour rounding is visible rather than a
+  // surprise on the payslip. Rounding is shown per-entry here only as a hint —
+  // the real rounding happens once on the week total.
+  function updateTimeEntryPreview() {
+    const el = document.getElementById("tlRounded");
+    if (!el) return;
+    const mins = currentEntryMinutes();
+    el.textContent = mins
+      ? fmtExactMins(mins) + " — counts toward your week total (weeks are rounded to the nearest ¼ hour)"
+      : "";
+  }
+
+  function setTimeEntryMode(mode) {
+    timeEntryMode = mode;
+    document.getElementById("tlModeRange").classList.toggle("active", mode === "range");
+    document.getElementById("tlModeDur").classList.toggle("active", mode === "duration");
+    document.getElementById("tlRangeBox").style.display = mode === "range" ? "" : "none";
+    document.getElementById("tlDurBox").style.display = mode === "duration" ? "" : "none";
+    updateTimeEntryPreview();
+  }
+
+  function openTimeEntry(entry) {
+    timeEntryEditId = entry ? entry.id : null;
+    const cats = (bootstrap.timelogCategories || ["Other"]);
+    document.getElementById("mTimeTitle").textContent = entry ? "Edit Entry" : "Log Off-Site Hours";
+    document.getElementById("tlCat").innerHTML = cats
+      .map(c => `<option value="${esc(c)}" ${entry && entry.category === c ? "selected" : ""}>${esc(c)}</option>`).join("");
+    document.getElementById("tlDate").value = entry ? entry.workDate : isoDate(new Date());
+    document.getElementById("tlStart").value = entry ? (entry.startTime || "") : "";
+    document.getElementById("tlEnd").value = entry ? (entry.endTime || "") : "";
+    const mins = entry ? entry.minutes : 0;
+    document.getElementById("tlHours").value = entry && !entry.startTime ? Math.floor(mins / 60) : "";
+    document.getElementById("tlMins").value = entry && !entry.startTime ? mins % 60 : "";
+    document.getElementById("tlDesc").value = entry ? entry.description : "";
+    setTimeEntryMode(entry && !entry.startTime ? "duration" : "range");
+
+    const del = document.getElementById("btnDelTimeEntry");
+    del.style.display = entry ? "" : "none";
+    if (entry) del.onclick = () => deleteTimeEntry(entry.id, del);
+    document.getElementById("btnSaveTimeEntry").onclick = (ev) => saveTimeEntry(ev.target);
+
+    ["tlStart", "tlEnd", "tlHours", "tlMins"].forEach(id => {
+      document.getElementById(id).oninput = updateTimeEntryPreview;
+    });
+    updateTimeEntryPreview();
+    document.getElementById("mTimeEntry").style.display = "flex";
+  }
+
+  async function saveTimeEntry(btn) {
+    const workDate = document.getElementById("tlDate").value;
+    const desc = document.getElementById("tlDesc").value.trim();
+    if (!workDate) return showToast("Pick the date the work happened");
+    if (!desc) return showToast("Add a short description");
+    const mins = currentEntryMinutes();
+    if (!mins) return showToast(timeEntryMode === "range" ? "End time must be after start time" : "Enter how long it took");
+
+    btn.disabled = true; btn.textContent = "Saving...";
+    try {
+      await api("saveTimeEntry", {
+        sessionToken,
+        id: timeEntryEditId || undefined,
+        workDate,
+        startTime: timeEntryMode === "range" ? document.getElementById("tlStart").value : "",
+        endTime:   timeEntryMode === "range" ? document.getElementById("tlEnd").value : "",
+        minutes: mins,
+        category: document.getElementById("tlCat").value,
+        description: desc
+      });
+      invalidateCache(["listTimeEntries", "timeLogWeeks"]);
+      closeModals();
+      showToast(timeEntryEditId ? "Entry updated" : "Hours logged");
+      render();
+    } catch (e) { handleError(e); }
+    finally { btn.disabled = false; btn.textContent = "Save"; }
+  }
+
+  async function deleteTimeEntry(id, btn) {
+    if (!confirm("Delete this entry?")) return;
+    btn.disabled = true;
+    try {
+      await api("deleteTimeEntry", { sessionToken, id });
+      invalidateCache(["listTimeEntries", "timeLogWeeks"]);
+      closeModals();
+      showToast("Entry deleted");
+      render();
+    } catch (e) { handleError(e); btn.disabled = false; }
+  }
+
+  function tlStatusChip(w) {
+    if (w.lateCount) return `<span class="tl-status late">${w.lateCount} late</span>`;
+    if (w.enteredInToast) return `<span class="tl-status entered">In Toast</span>`;
+    if (w.allApproved) return `<span class="tl-status approved">Approved</span>`;
+    return `<span class="tl-status pending">Pending review</span>`;
+  }
+
+  // Staff view: their own weeks, newest first. Approved/entered weeks stay
+  // visible (read-only) so they can check what payroll actually received.
+  async function loadMyTimeLog(rv) {
+    const box = document.getElementById("tlMine");
+    if (!box) return;
+    try {
+      const res = await api("listTimeEntries", { sessionToken }, { cache: true, cacheKey: "listTimeEntries:mine" });
+      if (rv !== renderVersion || !document.getElementById("tlMine")) return;
+      const weeks = res.weeks || [];
+      if (!weeks.length) {
+        box.innerHTML = `<div class="muted">Nothing logged yet. Tap “+ Log Hours” after you do work off-site.</div>`;
+        return;
+      }
+      // Deep link from the Monday reminder email lands on that specific week.
+      const focus = tlDeepLinkWeek;
+      tlDeepLinkWeek = null;
+      const ordered = focus
+        ? weeks.slice().sort((a, b) => (b.weekStart === focus) - (a.weekStart === focus))
+        : weeks;
+      box.innerHTML = ordered.slice(0, 8).map(w => tlWeekCard(w, {})).join("");
+    } catch (e) {
+      if (rv !== renderVersion || !document.getElementById("tlMine")) return;
+      box.innerHTML = `<div class="muted">Couldn't load your hours. Pull down to retry.</div>`;
+    }
+  }
+
+  // Manager view: everything outstanding first, so the Tuesday email and this
+  // screen tell the same story.
+  async function renderTimeLogReview(rv) {
+    const box = document.getElementById("tlReview");
+    if (!box) return;
+    try {
+      const res = await api("timeLogWeeks", { sessionToken }, { cache: true, cacheKey: "timeLogWeeks:all" });
+      if (rv !== renderVersion || !document.getElementById("tlReview")) return;
+      const weeks = res.weeks || [];
+      if (!weeks.length) {
+        box.innerHTML = `<div class="muted">No off-site hours logged yet.</div>`;
+        return;
+      }
+      const open = weeks.filter(w => w.pendingCount > 0 || w.needsEntry || w.lateCount > 0);
+      const done = weeks.filter(w => !(w.pendingCount > 0 || w.needsEntry || w.lateCount > 0));
+
+      const actions = (w) => {
+        let out = "";
+        if (w.pendingCount > 0) {
+          out += `<button class="btn primary small" style="flex:1" onclick="approveWeek('${esc(w.weekStart)}','${esc(w.staffEmail)}',this)">Approve ${w.pendingCount}</button>`;
+        }
+        if (w.needsEntry) {
+          out += `<button class="btn small" style="flex:1" onclick="markWeekEntered('${esc(w.weekStart)}','${esc(w.staffEmail)}',true,this)">Mark entered in Toast</button>`;
+        }
+        if (w.enteredInToast) {
+          out += `<button class="btn small" style="flex:1" onclick="markWeekEntered('${esc(w.weekStart)}','${esc(w.staffEmail)}',false,this)">Undo “in Toast”</button>`;
+        }
+        return out;
+      };
+
+      let html = "";
+      if (open.length) {
+        html += `<div class="muted" style="margin-bottom:8px">Needs you (${open.length})</div>`;
+        html += open.map(w => tlWeekCard(w, { showName: true, isManager: true, actions, warn: tlLateWarning })).join("");
+      }
+      if (done.length) {
+        html += `<div class="muted" style="margin:16px 0 8px">Settled (${done.length})</div>`;
+        html += done.slice(0, 12).map(w => tlWeekCard(w, { showName: true, isManager: true, actions })).join("");
+      }
+      box.innerHTML = html;
+    } catch (e) {
+      if (rv !== renderVersion || !document.getElementById("tlReview")) return;
+      box.innerHTML = `<div class="muted">Couldn't load hours.</div>`;
+    }
+  }
+
+  async function approveWeek(weekStart, staffEmail, btn) {
+    btn.disabled = true; btn.textContent = "Approving...";
+    try {
+      await api("approveTimeEntries", { sessionToken, weekStart, staffEmail });
+      invalidateCache(["listTimeEntries", "timeLogWeeks"]);
+      showToast("Approved");
+      render();
+    } catch (e) { handleError(e); btn.disabled = false; btn.textContent = "Approve"; }
+  }
+
+  async function markWeekEntered(weekStart, staffEmail, entered, btn) {
+    btn.disabled = true; btn.textContent = entered ? "Marking..." : "Undoing...";
+    try {
+      await api("markWeekEnteredInToast", { sessionToken, weekStart, staffEmail, entered });
+      invalidateCache(["listTimeEntries", "timeLogWeeks"]);
+      showToast(entered ? "Marked as entered in Toast" : "Mark removed");
+      render();
+    } catch (e) { handleError(e); btn.disabled = false; btn.textContent = entered ? "Mark entered in Toast" : "Undo “in Toast”"; }
+  }
+
+  // Entries are looked up by id rather than serialised into the onclick
+  // attribute — a description containing a quote would otherwise break the
+  // markup (and hand anyone who can log hours a script injection).
+  const tlEntryById = new Map();
+
+  function openTimeEntryById(id) {
+    const e = tlEntryById.get(String(id));
+    if (e) openTimeEntry(e);
+  }
+
+  function tlWeekCard(w, opts) {
+    opts = opts || {};
+    const entries = w.entries.map(e => {
+      tlEntryById.set(String(e.id), e);
+      const when = e.startTime && e.endTime ? `${e.startTime}–${e.endTime}` : fmtExactMins(e.minutes);
+      const locked = e.status === "approved" && !opts.isManager;
+      return `
+        <div class="tl-entry">
+          <div style="flex:1; min-width:0">
+            <div style="font-weight:700">${esc(e.workDate.slice(5))} · ${esc(e.category)} <span class="muted">${esc(when)}</span></div>
+            <div class="muted" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis">${esc(e.description)}</div>
+          </div>
+          <div style="text-align:right; white-space:nowrap">
+            <span style="font-weight:700">${fmtExactMins(e.minutes)}</span>
+            ${locked ? "" : `<button class="btn small" style="margin-left:6px" onclick="openTimeEntryById('${esc(e.id)}')">Edit</button>`}
+          </div>
+        </div>`;
+    }).join("");
+
+    return `
+      <div class="tl-week">
+        <div class="tl-week-head">
+          <div style="flex:1; min-width:0">
+            <div style="font-weight:800">${opts.showName ? esc(w.staffName) + " · " : ""}${esc(w.weekLabel)}</div>
+            <div style="margin-top:4px">${tlStatusChip(w)} <span class="muted">${esc(w.exactLabel)} exact</span></div>
+          </div>
+          <div class="tl-toast">${w.toastHours.toFixed(2)}<small>hours for Toast</small></div>
+        </div>
+        <div style="margin-top:10px">${entries}</div>
+        ${opts.warn ? opts.warn(w) : ""}
+        ${opts.actions ? `<div class="row" style="gap:8px; margin-top:10px">${opts.actions(w)}</div>` : ""}
+      </div>`;
+  }
+
+  // A week that was already keyed into Toast and then picked up new entries.
+  // Toast needs a manual adjustment — the app can't reach in and fix it.
+  function tlLateWarning(w) {
+    if (!w.lateCount) return "";
+    return `<div class="muted" style="color:#c0392b; margin-top:8px">
+      ${w.lateCount} entr${w.lateCount === 1 ? "y" : "ies"} added after this week was marked entered in Toast.
+      The ${w.toastHours.toFixed(2)} h above is the corrected total — adjust Toast to match, then re-mark the week.
+    </div>`;
+  }
 
   function moveDate(dir) {
     const isWeekMode = (activeTab === 'schedule' && subTabs.schedule !== 'month') /* v3.2 2026-07-18 grid moves by week */
@@ -2840,6 +3203,30 @@
         localStorage.setItem("SCHED_SESSION", sessionToken);
       } catch(e) { /* silently ignore expired links */ }
     }
+  }
+
+  // v3.18 2026-08-02 — Reminder emails link to ?timelog=review (manager) or
+  // ?timelog=YYYY-MM-DD (staff, the Monday of the week being asked about).
+  // The staff link names a week that has ENDED, so without this the app would
+  // snap to the current Monday and drop them on an empty week.
+  function applyTimeLogDeepLink() {
+    const v = new URLSearchParams(location.search).get("timelog");
+    if (!v) return false;
+    history.replaceState({}, "", "/");
+
+    if (v === "review") {
+      if (!bootstrap.me.isManager) return false;
+      activeTab = "admin";
+      subTabs.admin = "hours";
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      if (!bootstrap.me.canLogHours) return false;
+      activeTab = "settings";
+      tlDeepLinkWeek = v;
+    } else {
+      return false;
+    }
+    document.querySelectorAll(".tab").forEach(tb => tb.classList.toggle("active", tb.dataset.tab === activeTab));
+    return true;
   }
 
   function applyBrand() {

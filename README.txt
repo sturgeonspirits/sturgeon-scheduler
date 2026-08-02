@@ -133,6 +133,41 @@ dates, with Cancel / Accept Anyway. It's a warning, not a block: choosing
 Accept Anyway re-sends with force:true and your unavailability entry is left
 untouched. Backend redeploy required.
 
+v3.18 / v7.0 2026-08-02 — Off-site work hours (Toast payroll helper):
+Staff who work away from the building can't punch in on Toast, so their hours
+had nowhere to live. New TimeLog sheet + a "Off-Site Hours" card in Profile,
+visible only to staff whose Staff-sheet "canLogHours" column is TRUE. They log
+a date, either start/end times or a plain duration, a category and a short
+description. Managers get an Admin > Hours tab: approve a person's week, then
+mark it entered in Toast so it can't be keyed in twice.
+
+Weeks run Monday–Sunday, matching Toast's payroll week and the app's existing
+snapToMonday(). Entries store EXACT minutes; the week total is rounded once to
+the nearest quarter hour, and that bold figure is what you type into Toast.
+Rounding per entry instead would turn three 10-minute errands into 45 billable
+minutes — there's a unit test covering this.
+
+Deliberately separate from the Shifts sheet, so these never create calendar
+events, appear in the staffing grid, fire shift reminders, show on the swap
+board, or attract task rollover. Also deliberately NOT folded into the existing
+Week/Month Summary hour reports — those are SCHEDULED hours; Toast remains the
+source of truth for payroll.
+
+Two reminders, both riding the existing hourly trigger (no new trigger, no need
+to re-run Install Triggers):
+  • Monday 8am CT — nudges off-site staff to log the week that just closed.
+    Skipped for anyone who already submitted. Links to ?timelog=YYYY-MM-DD,
+    which opens that (already ended) week rather than the current one.
+  • Tuesday 8am CT — emails karl@ with everything awaiting approval, everything
+    approved-but-not-yet-entered, and any late entries that landed on a week
+    already marked entered (those need a manual Toast adjustment). Covers all
+    weeks, not just last one, so an old straggler resurfaces. Silent when
+    there's nothing pending.
+
+SETUP: set canLogHours to TRUE in the Staff sheet for the one person who needs
+it. The TimeLog sheet and the canLogHours column are created automatically on
+first use. Backend redeploy required (new actions + reminders).
+
 KNOWN GAP: api_approveSwap still reassigns the shift with no conflict check, so
 a manager approving a stale swap can place it on someone who became unavailable
 after accepting. Not addressed here.
