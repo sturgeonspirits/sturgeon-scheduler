@@ -174,3 +174,63 @@ first use. Backend redeploy required (new actions + reminders).
 KNOWN GAP: api_approveSwap still reassigns the shift with no conflict check, so
 a manager approving a stale swap can place it on someone who became unavailable
 after accepting. Not addressed here.
+
+
+================================================================================
+MAINTENANCE: CHANGING WHO GETS NOTIFICATION EMAILS
+================================================================================
+
+All email addresses live in one place: the EMAIL_SETTINGS block near the top of
+code.gs (line 76). Nothing is buried in the middle of the file.
+
+    const EMAIL_SETTINGS = {
+      fromName: "Sturgeon Scheduling",
+      replyTo: "karl@sturgeonspirits.com",       <- staff replies land here
+      managerEmail: "karl@sturgeonspirits.com",  <- ALL manager alerts go here
+      staffNotifySubjectPrefix: "[Shift]",
+      managerNotifySubjectPrefix: "[Manager]"
+    };
+
+--- To move ALL manager notifications to someone else ---
+Change managerEmail, save, and REDEPLOY the Apps Script web app (Deploy >
+Manage deployments > edit > Deploy). Nothing takes effect until you redeploy.
+
+IMPORTANT: managerEmail is shared by three separate notifications. Changing it
+moves all three at once — there is no per-notification setting:
+  1. "Open Shift Claimed"           (api_claimOpenShift)
+  2. "Swap Accepted"                (api_acceptSwap)
+  3. "Off-site hours to enter in Toast"  (sendTimeLogManagerReminder, Tuesdays)
+
+--- To move ONLY the Tuesday payroll reminder ---
+If payroll moves to someone else but shift alerts should stay with Karl, don't
+touch managerEmail. Instead edit sendTimeLogManagerReminder() in code.gs (search
+for "TIMELOG_MGR_") and replace BOTH of these lines:
+
+      _timeLogRemindOnce_("TIMELOG_MGR_" + today, "timelogMgr", EMAIL_SETTINGS.managerEmail, ...
+        to: EMAIL_SETTINGS.managerEmail,
+
+with the new address, e.g. "payroll@sturgeonspirits.com". Both lines matter: the
+first is the de-dupe key in ReminderLog, the second is the actual recipient. If
+you change only the "to:" line, the reminder still de-dupes against the old
+address and can silently stop sending. Redeploy afterwards.
+
+To send it to more than one person, use a comma-separated string in the "to:"
+line ("a@x.com,b@x.com") and leave the _timeLogRemindOnce_ key as one address.
+
+--- Reminder schedule ---
+Both off-site-hour reminders are controlled by three constants near the top of
+code.gs (search TIMELOG_REMIND_HOUR):
+
+    TIMELOG_REMIND_HOUR = 8            // 8am Central, both reminders
+    TIMELOG_STAFF_REMIND_DAY = "Mon"   // staff: log last week's hours
+    TIMELOG_MGR_REMIND_DAY = "Tue"     // manager: enter them in Toast
+
+Use three-letter day names ("Mon", "Tue", ...). Both ride the existing hourly
+sendShiftReminders trigger and are no-ops outside their day/hour, so changing
+these needs a redeploy but NOT a re-run of Install Triggers.
+
+--- Testing a reminder without waiting for the day ---
+In the Apps Script editor, run sendTimeLogManagerReminder(new Date("2026-08-04T13:00:00Z"))
+— that's a Tuesday at 8am Central. Pass any date to simulate. Note it will
+still refuse to send twice for the same date: clear that row from the
+ReminderLog sheet (kind = "timelogMgr") to re-test.
