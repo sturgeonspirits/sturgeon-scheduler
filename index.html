@@ -14,7 +14,11 @@
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   <link rel="manifest" href="/icons/site.webmanifest">
 
-  <link rel="preconnect" href="/.netlify" />
+  <!-- v3.15 2026-08-02 — preconnect needs an origin, not a path. The old
+       href="/.netlify" was a silent no-op. Warm the TLS handshake to the
+       Apps Script origin the Netlify proxy ultimately talks to. -->
+  <link rel="preconnect" href="https://script.google.com" crossorigin />
+  <link rel="dns-prefetch" href="https://script.google.com" />
 
   <title>Sturgeon Spirits — Scheduler</title>
   <style>
@@ -307,7 +311,9 @@
     <div id="conflictIcon" style="display:none;"></div>
     <div id="conflictTitle" style="font-size:18px; font-weight:800; color:var(--danger); margin-bottom:8px;">Scheduling Conflict</div>
     <div id="conflictBody" style="font-size:14px; color:var(--text); line-height:1.5; margin-bottom:20px;"></div>
-    <button class="btn primary" style="width:100%;" onclick="closeModals()">Got It</button>
+    <div class="row" id="conflictActions" style="gap:8px; flex-wrap:nowrap;"><!-- v3.17 2026-08-02 -->
+      <button class="btn primary" style="width:100%;" onclick="closeModals()">Got It</button>
+    </div>
   </div>
 </div>
 
@@ -604,10 +610,14 @@
     toastTimer = setTimeout(() => t.classList.remove("visible"), ms);
   }
 
-  function showConflictPopup(errorMsg) {
+  // v3.17 2026-08-02 — onOverride turns this into a soft warning: the modal
+  // grows an "Accept Anyway" button that re-runs the action with force:true.
+  // Sent as SOFTCONFLICT|... by the backend; CONFLICT|... still hard blocks.
+  function showConflictPopup(errorMsg, onOverride) {
     const parts = errorMsg.split("|");
     // Format: CONFLICT|type|staffName|reason/task|startCT|endCT
-    if (parts.length < 6 || parts[0] !== "CONFLICT") return false;
+    if (parts.length < 6 || (parts[0] !== "CONFLICT" && parts[0] !== "SOFTCONFLICT")) return false;
+    const soft = parts[0] === "SOFTCONFLICT" && typeof onOverride === "function";
 
     const type = parts[1];
     const staffName = parts[2];
@@ -619,7 +629,7 @@
     const body = document.getElementById("conflictBody");
 
     if (type === "unavail") {
-      title.textContent = "Unavailability Conflict";
+      title.textContent = soft ? "You're Marked Unavailable" : "Unavailability Conflict";
       body.innerHTML =
         `<div style="font-weight:700; font-size:16px; margin-bottom:8px;">${esc(staffName)}</div>` +
         `<div style="background:#fff3f3; border:1px solid rgba(176,0,32,0.15); border-radius:10px; padding:12px; margin-bottom:8px;">` +
@@ -627,7 +637,9 @@
           `<div style="margin-top:6px; font-size:13px; color:var(--muted);">${esc(startCT)}</div>` +
           `<div style="font-size:13px; color:var(--muted);">through ${esc(endCT)}</div>` +
         `</div>` +
-        `<div style="font-size:13px; color:var(--muted);">Remove the unavailability block first, or choose a different time/person.</div>`;
+        `<div style="font-size:13px; color:var(--muted);">${soft
+          ? 'This shift overlaps time you blocked off. You can still take it — your unavailability stays as it is.'
+          : 'Remove the unavailability block first, or choose a different time/person.'}</div>`;
     } else {
       title.textContent = "Shift Conflict";
       body.innerHTML =
@@ -638,6 +650,17 @@
           `<div style="font-size:13px; color:var(--muted);">through ${esc(endCT)}</div>` +
         `</div>` +
         `<div style="font-size:13px; color:var(--muted);">This person already has a shift during this time. Change the time or assign someone else.</div>`;
+    }
+
+    // v3.17 2026-08-02 — swap the single "Got It" for Cancel / Accept Anyway
+    // when the caller supplied an override.
+    const actions = document.getElementById("conflictActions");
+    actions.innerHTML = soft
+      ? `<button class="btn" style="flex:1;" onclick="closeModals()">Cancel</button>
+         <button class="btn accent" style="flex:1;" id="btnConflictOverride">Accept Anyway</button>`
+      : `<button class="btn primary" style="width:100%;" onclick="closeModals()">Got It</button>`;
+    if (soft) {
+      document.getElementById("btnConflictOverride").onclick = () => { closeModals(); onOverride(); };
     }
 
     document.getElementById("mConflict").style.display = "flex";
@@ -693,6 +716,18 @@
     const y = anchor.getFullYear();
     const m = anchor.getMonth() + 1;
     return y + "-" + (m < 10 ? "0" : "") + m + "-01T12:00:00";
+  }
+
+  // v3.15 2026-08-02 — One canonical cache key for the schedule fetch.
+  // renderSchedule() and maybeShowOnShift() were asking for the same week's
+  // data with differently-shaped argument objects, so the default key
+  // (action + JSON.stringify(data)) didn't match and neither the cache nor
+  // the in-flight dedupe caught it — every load fired dashSchedule twice.
+  // Keys stay prefixed with "dashSchedule" so invalidateCache() still works.
+  function schedCacheKey(mode) {
+    return mode === 'month'
+      ? "dashSchedule:month:" + localMonthISO(monthAnchor)
+      : "dashSchedule:week:" + weekStart.toISOString();
   }
 
   async function api(action, data, { cache = false, cacheKey = null } = {}) {
@@ -771,6 +806,67 @@
     el.innerHTML = Array(count).fill('<div class="skeleton"></div>').join('');
   }
 
+  // ==========================================================================
+  // v3.15 2026-08-02 — Fast initial load
+  // Two changes: (1) one "initLoad" request replaces the old four sequential
+  // calls, and (2) the last successful payload is kept in localStorage so a
+  // returning user sees their schedule immediately while fresh data is
+  // fetched behind it (stale-while-revalidate).
+  // ==========================================================================
+  const INIT_CACHE_KEY = "SCHED_INIT_V1";
+  const INIT_CACHE_MAX_AGE = 7 * 86400000; // a week-old snapshot is still a useful first paint
+
+  function writeInitCache(payload) {
+    try {
+      localStorage.setItem(INIT_CACHE_KEY, JSON.stringify({
+        ts: Date.now(),
+        weekStartISO: weekStart.toISOString(),
+        token: sessionToken,
+        payload: payload
+      }));
+    } catch(_) { /* quota / private mode — caching is optional */ }
+  }
+
+  function readInitCache() {
+    try {
+      const raw = localStorage.getItem(INIT_CACHE_KEY);
+      if (!raw) return null;
+      const c = JSON.parse(raw);
+      // Only reuse it for the same session and the same week we're showing,
+      // otherwise the shifts on screen would be for the wrong dates.
+      if (!c || c.token !== sessionToken) return null;
+      if (c.weekStartISO !== weekStart.toISOString()) return null;
+      if (Date.now() - c.ts > INIT_CACHE_MAX_AGE) return null;
+      return c.payload;
+    } catch(_) { return null; }
+  }
+
+  function clearInitCache() {
+    try { localStorage.removeItem(INIT_CACHE_KEY); } catch(_) {}
+  }
+
+  // Fans an initLoad payload out into module state and seeds apiCache under
+  // the exact keys renderSchedule()/loadTodosSafe() will look for, so the
+  // first render costs zero extra round trips.
+  function applyInitPayload(p) {
+    bootstrap = p.bootstrap;
+    const sched = p.schedule || { shifts: [] };
+    const todos = p.todos || { items: [] };
+    const templates = p.templates || { items: [] };
+
+    globalShifts = sched.shifts || [];
+    todosCache = todos.items || [];
+    templatesCache = templates.items || [];
+
+    const now = Date.now();
+    apiCache.set(schedCacheKey('week'), { data: sched, ts: now });
+    apiCache.set("listTodos:" + JSON.stringify({ sessionToken }), { data: todos, ts: now });
+    apiCache.set("listTemplates:" + JSON.stringify({ sessionToken }), { data: templates, ts: now });
+
+    syncShiftTaskAssignees();
+    buildTaskMaps();
+  }
+
   async function init() {
     await checkUrlToken();
     if(!sessionToken) return renderLogin();
@@ -778,21 +874,50 @@
     const view = document.getElementById("view-schedule");
     document.querySelectorAll(".app-view").forEach(v => v.style.display = "none");
     view.style.display = "block";
-    showSkeleton(view, 4);
+
+    // Instant paint from the previous session, if we have one.
+    let painted = false;
+    const cached = readInitCache();
+    if (cached) {
+      try {
+        applyInitPayload(cached);
+        applyBrand();
+        renderNav();
+        render(false); // false: the cache we just seeded IS the data
+        maybeShowOnShift().catch(() => {});
+        painted = true;
+      } catch(e) {
+        console.warn("Stale init paint failed, falling back to skeleton:", e);
+        clearInitCache();
+        painted = false;
+      }
+    }
+    if (!painted) showSkeleton(view, 4);
 
     try {
-      bootstrap = await api("bootstrap", { sessionToken });
+      const payload = await api("initLoad", { sessionToken, weekStartISO: weekStart.toISOString() });
+      applyInitPayload(payload);
+      writeInitCache(payload);
       applyBrand();
       renderNav();
       startPoller();
-      render(true);
+      render(false);
       // v3.7 2026-07-19 — if opening during your own shift, land on the task
       // checklist for that shift; the calendar is one tap/swipe away.
       maybeShowOnShift().catch(() => {});
     } catch(e) {
       console.error("Bootstrap failed:", e);
+      // v3.15 2026-08-02 — only drop the saved snapshot when the session is
+      // actually invalid. A network blip must NOT wipe it, or the next
+      // offline reload loses its instant paint too.
       if (e.message.includes("Session expired") || e.message.includes("Account revoked")) {
         logout();
+      } else if (painted) {
+        // v3.15 2026-08-02 — we already have last session's schedule on
+        // screen; don't wipe it out with an error card. Flag it as stale
+        // and let them keep working.
+        updateConnStatus(false);
+        showToast("Offline — showing your last saved schedule");
       } else {
         view.innerHTML = `
           <div class="card" style="text-align:center">
@@ -858,6 +983,10 @@
   // one tap ("View Schedule") or a left-swipe away.
   // ==========================================================================
   let nowShiftId = null;
+  // v3.15 2026-08-02 — the fast path can run maybeShowOnShift twice (once on
+  // the instant cached paint, once on revalidation). If the user dismissed
+  // the screen in between, don't yank them back to it.
+  let nowShiftDismissed = false;
 
   function myCurrentShift() {
     const now = Date.now();
@@ -880,12 +1009,14 @@
 
   async function maybeShowOnShift() {
     // Load this week's shifts + tasks so we can detect a live shift
-    await api("dashSchedule", { sessionToken, mode: 'week', weekStartISO: weekStart.toISOString() }, { cache: true })
+    await api("dashSchedule", { sessionToken, mode: 'week', weekStartISO: weekStart.toISOString() },
+              { cache: true, cacheKey: schedCacheKey('week') }) // v3.15 2026-08-02
       .then(d => { globalShifts = d.shifts || []; });
     await loadTodosSafe();
     syncShiftTaskAssignees();
     buildTaskMaps();
 
+    if (nowShiftDismissed) return; // v3.15 2026-08-02
     const shift = myCurrentShift();
     if (!shift) return;
     nowShiftId = shift.eventId;
@@ -1021,6 +1152,7 @@
   }
 
   window.dismissNowShift = function() {
+    nowShiftDismissed = true; // v3.15 2026-08-02
     const el = document.getElementById("nowShift");
     el.classList.add('hiding');
     setTimeout(() => { el.style.display = 'none'; el.innerHTML = ''; }, 300);
@@ -1150,7 +1282,7 @@
       mode: mode === 'month' ? 'month' : 'week',
       weekStartISO: weekStart.toISOString(),
       monthISO: localMonthISO(monthAnchor)
-    }, { cache: true });
+    }, { cache: true, cacheKey: schedCacheKey(mode) }); // v3.15 2026-08-02
 
     if (rv !== renderVersion) return;
 
@@ -2210,22 +2342,29 @@
     }
   };
 
-  async function handleSwapAction(swapId, action, btn) {
-    if(btn) { btn.disabled = true; btn.textContent = "Processing..."; btn.closest('.shift').style.opacity = '0.5'; }
+  // v3.17 2026-08-02 — `force` re-sends an accept the staff member confirmed
+  // after being warned their own unavailability overlaps the shift.
+  async function handleSwapAction(swapId, action, btn, force) {
+    if(btn) { btn.disabled = true; btn.textContent = "Processing..."; const sh = btn.closest('.shift'); if (sh) sh.style.opacity = '0.5'; }
     try {
       if (action === 'approve') {
         await api("approveSwap", { sessionToken, swapId });
       } else {
-        await api("acceptSwap", { sessionToken, swapId });
+        await api("acceptSwap", { sessionToken, swapId, force: !!force });
       }
-      
+
       invalidateAll();
-      
+
       showToast(action === 'approve' ? "Swap Approved!" : "Swap Claimed!");
       render(true);
-    } catch(e) { 
-      handleError(e); 
-      render(true); 
+    } catch(e) {
+      if (e.message && e.message.startsWith("SOFTCONFLICT|")) {
+        showConflictPopup(e.message, () => handleSwapAction(swapId, action, null, true));
+        render(true);
+        return;
+      }
+      handleError(e);
+      render(true);
     }
   }
 
@@ -2674,7 +2813,7 @@
     }
   };
 
-  function logout() { localStorage.removeItem("SCHED_SESSION"); location.reload(); }
+  function logout() { localStorage.removeItem("SCHED_SESSION"); clearInitCache(); location.reload(); } // v3.15 2026-08-02
 
   function renderNav() {
     document.getElementById("navTabs").style.display = "flex";
@@ -2778,19 +2917,25 @@
   // on the backend; undone dated tasks auto-roll forward in the display.
   // ════════════════════════════════════════════════════════════════════════
 
+  // v3.15 2026-08-02 — listTodos and listTemplates are independent, but were
+  // awaited one after the other, so every render paid two serial Apps Script
+  // round trips instead of one. Fire them together.
   async function loadTodosSafe(throwOnError, force) {
-    try {
-      if (force) invalidateCache(["listTodos"]);
-      const d = await api("listTodos", { sessionToken }, { cache: true });
-      todosCache = d.items || [];
-    } catch(e) {
+    if (force) invalidateCache(["listTodos"]);
+
+    const [todosRes, tplRes] = await Promise.allSettled([
+      api("listTodos", { sessionToken }, { cache: true }),
+      api("listTemplates", { sessionToken }, { cache: true })
+    ]);
+
+    if (todosRes.status === "fulfilled") {
+      todosCache = todosRes.value.items || [];
+    } else {
       todosCache = [];
-      if (throwOnError) throw e;
+      if (throwOnError) throw todosRes.reason;
     }
-    try {
-      const td = await api("listTemplates", { sessionToken }, { cache: true });
-      templatesCache = td.items || [];
-    } catch(_) { templatesCache = []; }
+
+    templatesCache = tplRes.status === "fulfilled" ? (tplRes.value.items || []) : [];
   }
 
   // v3.6 2026-07-19 — IDs from the sheet can come back with stray whitespace or
@@ -2899,6 +3044,9 @@
     const metaBits = [];
     if (taskPrioLabel(t)) metaBits.push(taskPrioLabel(t)); // v3.8 2026-07-19
     if (t.assignedTo) metaBits.push('→ ' + esc(staffNameFromEmail(t.assignedTo)));
+    // v3.16 2026-08-02 — in the merged Mine & Open list, flag the rows that
+    // aren't anyone's yet so they read differently from the person's own work.
+    else if (opts.markOpen && !t.done && !t.shiftId) metaBits.push('up for grabs');
     // v3.14 2026-07-23 — open tasks show just the date; tasks with a specific
     // time show "for Jul 24 at 3:00 PM" (overdue ones never show time — the
     // moment has passed, only the rolled-forward date matters). When the date
@@ -3003,7 +3151,14 @@
     } catch(e) { handleError(e); if (btn) btn.disabled = false; }
   }
 
-  // ---- Tasks tab: My Tasks / Up for Grabs / All ----
+  // ---- Tasks tab: Mine & Open / All ----
+  // v3.16 2026-08-02 — The Tasks tab used to open on "My Tasks", which hid
+  // every unclaimed task behind a separate "Up for Grabs" sub-tab, so staff
+  // had to go looking for work that was available to them. The first screen
+  // now merges a person's own tasks with everything that's unassigned, fully
+  // interleaved through the same Overdue/Today/Upcoming/Anytime sections.
+  // Only tasks assigned to somebody ELSE are held back (they show under All).
+  // The "Up for Grabs" sub-tab is gone — it's the default view now.
   async function renderTasks(el, rv) {
     try {
       await loadTodosSafe(true);
@@ -3027,17 +3182,19 @@
     const today = isoDate(new Date());
     const todos = todosCache;
 
+    // v3.16 2026-08-02 — opts may now be a function of the task, so a single
+    // section can render owned and unassigned rows differently (the latter
+    // get a Take button).
     const section = (title, list, opts, titleStyle) => list.length ? `
       <div class="card">
         <div class="h2" style="margin-bottom:10px; ${titleStyle || ''}">${title} <span style="font-weight:400; color:var(--muted); font-size:14px">(${list.length})</span></div>
-        ${[...list].sort(byPriority).map(t => renderTaskRow(t, opts)).join('')}
+        ${[...list].sort(byPriority).map(t => renderTaskRow(t, typeof opts === 'function' ? opts(t) : opts)).join('')}
       </div>` : ''; // v3.8 2026-07-19 — priority-sorted
 
     let html = `
       <div class="segmented">
-        <button class="seg-btn ${sub === 'my' ? 'active' : ''}" onclick="setSub('tasks','my')">My Tasks</button>
-        <button class="seg-btn ${sub === 'grabs' ? 'active' : ''}" onclick="setSub('tasks','grabs')">Up for Grabs</button>
-        <button class="seg-btn ${sub === 'all' ? 'active' : ''}" onclick="setSub('tasks','all')">All</button>
+        <button class="seg-btn ${sub !== 'all' ? 'active' : ''}" onclick="setSub('tasks','my')">Mine &amp; Open</button>
+        <button class="seg-btn ${sub === 'all' ? 'active' : ''}" onclick="setSub('tasks','all')">All</button><!-- v3.16 2026-08-02 -->
       </div>
       <div class="card">
         <div class="h2" style="margin-bottom:12px">Add Task</div>
@@ -3067,36 +3224,38 @@
           </div>` : ''}
       </div>`;
 
-    if (sub === 'my') {
-      const mine = todos.filter(t => t.assignedTo === me.email);
-      const overdue  = mine.filter(t => !t.done && t.date && t.date < today);
-      const dueToday = mine.filter(t => !t.done && t.date === today);
-      const upcoming = mine.filter(t => !t.done && t.date && t.date > today)
-        .sort((a, b) => { const ka = a.date + (a.time || ''); const kb = b.date + (b.time || ''); return ka < kb ? -1 : ka > kb ? 1 : 0; }); // v3.14 2026-07-23 — sort by date+time
-      const anytime  = mine.filter(t => !t.done && !t.date);
-      const doneMine = mine.filter(t => t.done);
+    if (sub !== 'all') {
+      // v3.16 2026-08-02 — one merged list: this person's own tasks plus
+      // anything nobody has claimed. A task with no assignee but pinned to a
+      // shift already belongs to whoever works that shift, so it stays out —
+      // same rule the old "Up for Grabs" tab used.
+      const isOpen  = t => !t.assignedTo && !t.shiftId;
+      const visible = todos.filter(t => t.assignedTo === me.email || isOpen(t));
 
-      if (!mine.length) {
+      // Per-row opts so unassigned rows get a Take button and an "up for
+      // grabs" tag, while the person's own rows stay as they were.
+      const rowOpts = extra => t => Object.assign({ take: isOpen(t), markOpen: true }, extra || {});
+
+      const active   = visible.filter(t => !t.done);
+      const overdue  = active.filter(t => t.date && t.date < today);
+      const dueToday = active.filter(t => t.date === today);
+      const upcoming = active.filter(t => t.date && t.date > today)
+        .sort((a, b) => { const ka = a.date + (a.time || ''); const kb = b.date + (b.time || ''); return ka < kb ? -1 : ka > kb ? 1 : 0; }); // v3.14 2026-07-23 — sort by date+time
+      const anytime  = active.filter(t => !t.date);
+      const doneList = visible.filter(t => t.done);
+
+      if (!visible.length) {
         html += `<div class="card" style="text-align:center; padding:24px;">
           <div style="font-size:32px; margin-bottom:8px;">🎉</div>
-          <div class="muted">Nothing assigned to you — check Up for Grabs.</div>
+          <div class="muted">Nothing to do right now — you're all caught up.</div>
         </div>`;
       } else {
-        html += section('Overdue', overdue, {}, 'color:var(--accent)');
-        html += section('Today', dueToday, { showDate: false });
-        html += section('Upcoming', upcoming, {});
-        html += section('Anytime', anytime, {});
-        html += section('Done', doneMine, {}, 'color:var(--muted)');
+        html += section('Overdue', overdue, rowOpts(), 'color:var(--accent)');
+        html += section('Today', dueToday, rowOpts({ showDate: false }));
+        html += section('Upcoming', upcoming, rowOpts());
+        html += section('Anytime', anytime, rowOpts());
+        html += section('Done', doneList, rowOpts(), 'color:var(--muted)');
       }
-    } else if (sub === 'grabs') {
-      const grabs = todos.filter(t => !t.done && !t.assignedTo && !t.shiftId)
-        .sort((a, b) => (a.date || '9999') < (b.date || '9999') ? -1 : 1);
-      html += grabs.length
-        ? section('Up for Grabs', grabs, { take: true })
-        : `<div class="card" style="text-align:center; padding:24px;">
-            <div style="font-size:32px; margin-bottom:8px;">✅</div>
-            <div class="muted">Nothing up for grabs — everything's claimed!</div>
-          </div>`;
     } else {
       const active = todos.filter(t => !t.done);
       const done = todos.filter(t => t.done);

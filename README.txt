@@ -95,3 +95,44 @@ role (backend v6.6 TASKS list) for the new food service. The shift modal's
 "Task" dropdown was renamed "Shift Role" to distinguish shift roles from to-do
 tasks. Food Prep has a matching color in the staffing grid. Backend redeploy
 required so the new role reaches the Shift Role dropdown.
+
+v3.15 / v6.8 2026-08-02 — Faster initial load:
+Opening the app used to make four sequential requests (bootstrap →
+dashSchedule → listTodos → listTemplates), each paying full Apps Script
+invocation overhead. Backend v6.8 adds an "initLoad" action that returns all
+four in a single response, so cold load is now one round trip instead of four.
+The app also saves that payload to localStorage and paints your schedule from
+it instantly on the next open while it revalidates in the background — so
+repeat opens feel immediate, and going offline shows your last saved schedule
+instead of a "Connection Failed" card.
+Also fixed: renderSchedule() and the on-shift screen requested the same week's
+data with differently-shaped arguments, so neither the cache nor the in-flight
+dedupe matched and dashSchedule fired twice on every load. listTodos and
+listTemplates now run in parallel instead of one after the other. The
+<link rel="preconnect"> pointed at a path ("/.netlify") rather than an origin,
+which made it a no-op; it now warms script.google.com.
+Backend redeploy required (new initLoad action).
+
+v3.16 2026-08-02 — Tasks opens with your work AND unclaimed work:
+The Tasks tab used to open on "My Tasks", hiding every unclaimed task behind a
+separate "Up for Grabs" sub-tab, so staff had to go looking for work available
+to them. The first screen now merges your own tasks with everything unassigned,
+interleaved through the same Overdue/Today/Upcoming/Anytime sections and sorted
+by priority. Unclaimed rows are tagged "up for grabs" and carry a Take button.
+Only tasks assigned to someone else are held back — those are still under All.
+The "Up for Grabs" sub-tab is gone; the tabs are now "Mine & Open" and "All".
+Frontend only.
+
+v3.17 / v6.9 2026-08-02 — Warn when a swap lands on your unavailability:
+api_acceptSwap did no conflict checking whatsoever, so picking up an
+"open to anyone" swap was silently allowed even while you were marked
+unavailable — claiming a true open shift (api_claimOpenShift) has always been
+checked, which is why this only affected the swap board. Accepting a swap that
+overlaps your own unavailability now shows a warning naming the reason and
+dates, with Cancel / Accept Anyway. It's a warning, not a block: choosing
+Accept Anyway re-sends with force:true and your unavailability entry is left
+untouched. Backend redeploy required.
+
+KNOWN GAP: api_approveSwap still reassigns the shift with no conflict check, so
+a manager approving a stale swap can place it on someone who became unavailable
+after accepting. Not addressed here.

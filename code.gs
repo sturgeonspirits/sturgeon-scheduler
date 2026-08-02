@@ -1,5 +1,18 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v6.9 — Accepting an open-to-anyone swap now warns when it lands on your
+ *        own unavailability. api_acceptSwap did no conflict checking at
+ *        all, so picking up a shift this way was silently allowed even
+ *        while you were marked unavailable (claiming a true open shift
+ *        has always been checked). Warning is overridable — pass
+ *        force:true to accept anyway (2026-08-02)
+ * v6.8 — Fast initial load: new "initLoad" action bundles bootstrap +
+ *        week schedule + todos + templates into ONE request, so the app
+ *        pays Apps Script invocation overhead once instead of four
+ *        times in series (2026-08-02)
+ * v6.7 — Optional task due time: tasks can stay "open" (date only, or no
+ *        date at all) or be pinned to a specific date+time (2026-07-23)
+ * v6.6 — Added "Food Prep" shift role (food service launch) (2026-07-19)
  * v6.5 — Task priority (high/normal/low); sorts most important to the top (2026-07-19)
  * v6.4 — Hourly rollover: unfinished shift tasks move to the person's next
  *        shift, or back to Up for Grabs if none (2026-07-18)
@@ -291,6 +304,7 @@ function _route_(action, data) {
     case "dashRequests":  return api_dashboardRequests(data);
     case "dashAdmin":     return api_dashboardAdmin(data);
     case "bootstrap":        return api_bootstrap(data);
+    case "initLoad":         return api_initLoad(data); // v6.8 2026-08-02
     case "listWeek":         return api_listWeek(data);
     case "listMonth":        return api_listMonth(data);
     case "listOpenShifts":   return api_listOpenShifts(data);
@@ -337,6 +351,33 @@ function _route_(action, data) {
 // ============================================================================
 // 3b. COMPOSITE DASHBOARD ENDPOINTS (single call per view)
 // ============================================================================
+
+// ============================================================================
+// v6.8 2026-08-02 — SINGLE-ROUND-TRIP INITIAL LOAD
+// The app used to open with four sequential requests (bootstrap →
+// dashSchedule → listTodos → listTemplates). Each one paid the full Apps
+// Script invocation cost (script start, auth, openById) even though the
+// underlying sheet reads are cached, so load time was dominated by round
+// trips rather than work. This bundles all four into one call.
+// Todos/templates are wrapped in try/catch so a task-sheet problem can never
+// stop the schedule from loading.
+// ============================================================================
+function api_initLoad(data) {
+  const bootstrap = api_bootstrap(data);
+
+  const schedule = api_dashboardSchedule({
+    sessionToken: data.sessionToken,
+    mode: "week",
+    weekStartISO: data.weekStartISO
+  });
+
+  let todos = { items: [] };
+  let templates = { items: [] };
+  try { todos = api_listTodos(data); } catch (e) {}
+  try { templates = api_listTemplates(data); } catch (e) {}
+
+  return { bootstrap: bootstrap, schedule: schedule, todos: todos, templates: templates };
+}
 
 function api_dashboardSchedule(data) {
   const me = _requireSession_(data.sessionToken);
@@ -1175,6 +1216,18 @@ function api_acceptSwap(data) {
 
   if (!isAnyone && _normEmail_(swap.toEmail) !== me.email) throw new Error("Invalid swap target");
   if (isAnyone && _normEmail_(swap.fromEmail) === me.email) throw new Error("Cannot claim your own swap");
+
+  // v6.9 2026-08-02 — Warn if this shift lands on your own unavailability.
+  // Soft: the frontend offers "Accept Anyway", which re-sends with force:true.
+  // Open-ended/undated swaps have no usable window, so they're skipped.
+  if (!_asBool_(data.force)) {
+    const clash = _findUnavailConflict_(me.email, new Date(swap.startISO), new Date(swap.endISO));
+    if (clash) {
+      throw new Error("SOFTCONFLICT|unavail|" + (me.name || me.email) + "|" +
+        (clash.reason || "Unavailable") + "|" +
+        _fmtCentral_(clash.startISO) + "|" + _fmtCentral_(clash.endISO));
+    }
+  }
 
   const patch = { status: "ACCEPTED", acceptedAtISO: new Date().toISOString() };
   if (isAnyone) patch.toEmail = me.email;
@@ -2282,6 +2335,21 @@ function _invalidateAllCaches_() {
 
 function _invalidateShiftsCache_() {
   _cacheClearLarge_(CacheService.getScriptCache(), "shiftsAll");
+}
+
+// v6.9 2026-08-02 — Read-only counterpart to the unavailability half of
+// _assertNoHardConflicts_. Returns the overlapping row (or null) instead of
+// throwing, so callers can warn-and-let-through rather than hard block.
+function _findUnavailConflict_(email, s, e) {
+  const sTime = s.getTime(), eTime = e.getTime();
+  if (isNaN(sTime) || isNaN(eTime)) return null;
+  const rows = _getAvailCached_().filter(r => _normEmail_(r.staffEmail) === _normEmail_(email));
+  for (const r of rows) {
+    const rs = new Date(r.startISO).getTime(), re = new Date(r.endISO).getTime();
+    if (isNaN(rs) || isNaN(re)) continue;
+    if (sTime < re && rs < eTime) return r;
+  }
+  return null;
 }
 
 function _assertNoHardConflicts_(email, s, e, xId) {
