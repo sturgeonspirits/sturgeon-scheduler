@@ -176,6 +176,32 @@ a manager approving a stale swap can place it on someone who became unavailable
 after accepting. Not addressed here.
 
 
+v3.19 2026-08-02 — New app icon (ship's wheel clock, navy + gold):
+Whole icon set regenerated from icons/icon-master.png. Notes for next time:
+
+The supplied artwork had a rounded-square baked in with PURE BLACK corners.
+Left alone, those corners sit inside iOS's own squircle mask and show as black
+slivers. The build strips that baked edge and rebuilds the navy field so the
+background bleeds to all four sides — platforms then apply their own shape.
+If you ever swap the artwork, do the same: hand the platforms a full-bleed
+square, never a pre-rounded one.
+
+  icon-16/32/48 + favicon.ico  cropped in on the wheel — at those sizes the
+                               navy margin is wasted and only the gold rim reads
+  icon-64 .. 512, apple-touch  full-bleed, no transparency (iOS forbids alpha)
+  icon-maskable-192/512        wheel scaled so the gold rim lands at 78% of
+                               width; Android's maskable safe zone is the inner
+                               80% circle, and the untouched art spans ~83%,
+                               so it would have been clipped by round launchers
+
+theme-color and the manifest's background_color are now #18263A, sampled from
+the icon's own border so the PWA splash doesn't step against the icon.
+
+AFTER DEPLOYING: browsers cache favicons hard — hard-refresh (Cmd+Shift+R) or
+try a private window before concluding it didn't work. Anyone who already added
+the app to their home screen keeps the OLD icon until they remove and re-add it;
+there's no way to push an icon change to an installed PWA.
+
 ================================================================================
 MAINTENANCE: CHANGING WHO GETS NOTIFICATION EMAILS
 ================================================================================
