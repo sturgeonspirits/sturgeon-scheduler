@@ -813,7 +813,19 @@
           console.error("API Parse Error:", text);
           throw new Error("Invalid response from server. Check console.");
         }
-        if (!json.ok) throw new Error(json.error || "Request failed");
+        // v3.20 2026-08-23 — the Netlify proxy already converts Apps Script's
+        // busy/HTML error pages into {ok:false, error:"Non-JSON response from
+        // Google..."}, so the <HTML retry above never fired for them. Retry
+        // those here instead of throwing on the first hiccup.
+        if (!json.ok) {
+          const msg = String(json.error || "Request failed");
+          if (/Non-JSON response from Google/i.test(msg) && attempt < 2) {
+            attempt++;
+            await new Promise(r => setTimeout(r, 1000 * attempt));
+            continue;
+          }
+          throw new Error(msg);
+        }
         if (cache) apiCache.set(key, { data: json.result, ts: Date.now() });
         return json.result;
       }
@@ -1020,8 +1032,19 @@
       else if (activeTab === "settings") await renderSettings(view, thisRender);
       else if (activeTab === "admin") await renderAdmin(view, thisRender);
     } catch(e) {
-      if (thisRender === renderVersion && !view.innerHTML.includes('shift')) {
-        view.innerHTML = `<div class="card" style="color:var(--danger)">Error: ${esc(e.message)}</div>`;
+      // v3.20 2026-08-23 — render errors used to be swallowed whenever the old
+      // markup contained the word "shift", which is always true on the Schedule
+      // tab ("My Shifts Only", "No shifts scheduled"). A failed week fetch then
+      // looked like a dead ◀/▶ button. Now every failure is logged and shown.
+      console.error("Render failed (" + activeTab + "):", e);
+      if (thisRender === renderVersion) {
+        const msg = (e && e.message) || "Something went wrong";
+        if (!view.innerHTML.trim() || view.querySelector('.skeleton')) {
+          view.innerHTML = `<div class="card" style="color:var(--danger)">Couldn't load: ${esc(msg)}
+            <div style="margin-top:10px"><button class="btn small" onclick="render(true)">Try again</button></div></div>`;
+        } else {
+          showToast("Couldn't load: " + msg, 4000);
+        }
       }
     } finally {
       clearViewLoading();
@@ -1338,9 +1361,9 @@
 
     if (rv !== renderVersion) return;
 
-    const schedData = dashData;
-    const bullData = dashData.bulletin;
-    const swapItems = dashData.swaps || [];
+    const schedData = dashData || {};                 // v3.20 2026-08-23 — defensive:
+    const bullData = (dashData && dashData.bulletin) || {}; // a partial payload used to
+    const swapItems = (dashData && dashData.swaps) || [];   // throw and kill the re-render
 
     globalShifts = schedData.shifts || [];
 
@@ -2554,8 +2577,12 @@
     render(true);
   }
   function jumpToday() {
+    // v3.20 2026-08-23 — snap back to Monday. Without this, "Today"/"This Week"
+    // left weekStart on whatever weekday it was, so the schedule and the
+    // Mon–Sun payroll summary drifted off the payroll week.
     weekStart = new Date();
     weekStart.setHours(0,0,0,0);
+    weekStart = snapToMonday(weekStart);
     monthAnchor = new Date();
     showViewLoading();
     render(true);

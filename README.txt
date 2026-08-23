@@ -260,3 +260,18 @@ In the Apps Script editor, run sendTimeLogManagerReminder(new Date("2026-08-04T1
 — that's a Tuesday at 8am Central. Pass any date to simulate. Note it will
 still refuse to send twice for the same date: clear that row from the
 ReminderLog sheet (kind = "timelogMgr") to re-test.
+
+v3.20 2026-08-23 — Week nav no longer fails silently (frontend only):
+The ◀/▶ week buttons looked dead whenever the schedule fetch failed. Three
+causes, all fixed in index.html (no Apps Script redeploy needed):
+1. _render()'s catch only showed an error if the old markup did NOT contain
+   the word "shift" — which it always does on the Schedule tab. Every failure
+   was swallowed and the previous week stayed on screen. Errors now go to the
+   console and to a toast (or an error card with a Try Again button if the
+   view is empty).
+2. api() retried Apps Script's "busy" HTML page, but the Netlify proxy already
+   rewrites that into {ok:false, error:"Non-JSON response from Google..."}, so
+   the retry never fired. That shape is now retried twice with backoff.
+3. jumpToday() left weekStart on the current weekday instead of snapping to
+   Monday, so "Today"/"This Week" could drift off the Mon–Sun payroll week.
+Also hardened renderSchedule() against a partial dashSchedule payload.
