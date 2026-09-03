@@ -87,7 +87,9 @@
       width:24px; height:24px; border:3px solid var(--border); border-top-color:var(--accent);
       border-radius:50%; animation:spin 0.6s linear infinite; z-index:5;
     }
-    .view-loading > * { opacity:0.4; transition:opacity 0.15s; pointer-events:none; }
+    /* v3.22 2026-09-03 — a loading week stays readable instead of fading to
+       near-blank; the old 0.4 read as "the week emptied out". */
+    .view-loading > * { opacity:0.65; transition:opacity 0.15s; pointer-events:none; }
     @keyframes spin { to { transform:translateX(-50%) rotate(360deg); } }
 
     input, select, textarea { width:100%; padding:12px; border-radius:12px; border:1px solid var(--border); font-size:16px; background:#fff; margin-bottom:10px; }
@@ -158,6 +160,10 @@
     .toast.visible { opacity:1; }
 
     .skeleton { background:linear-gradient(90deg,#f0f0f0 25%,#e0e0e0 50%,#f0f0f0 75%); background-size:200% 100%; animation:shimmer 1.5s infinite; border-radius:8px; height:60px; margin-bottom:8px; }
+    /* v3.22 2026-09-03 — day-row placeholder used by the week scaffold, so a
+       cold load shows the real week with shimmering rows rather than a page
+       that looks like a week with nothing on it. */
+    .skeleton.row-ph { height:34px; margin:6px 0 2px; }
     @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
 
     .conn-status { font-size:10px; padding:2px 8px; border-radius:10px; }
@@ -630,13 +636,54 @@
 
   let renderVersion = 0;
   const apiCache = new Map();       
-  const CACHE_TTL = 30000;           
+  // v3.22 2026-09-03 — 30s meant almost every week change, view switch and tab
+  // return paid a fresh Apps Script round trip. Cached data is now good for two
+  // minutes, and anything older than SWR_MAX_AGE is painted immediately and
+  // refreshed behind the user's back (stale-while-revalidate).
+  const CACHE_TTL = 120000;
+  const SWR_MAX_AGE = 60000;
   const inflightRequests = new Map(); 
 
   let weekStart = new Date();
   weekStart.setHours(0,0,0,0);
   weekStart = snapToMonday(weekStart);
   let monthAnchor = new Date();
+
+  // ==========================================================================
+  // v3.22 2026-09-03 — Refresh keeps the week you were looking at
+  // Reloading (or the browser restoring the tab) used to snap back to the
+  // current week, which is maddening mid-way through building next month's
+  // schedule. The week/month/view you were on is remembered for 12 hours;
+  // after that a fresh open lands on today, and "Today" always snaps back.
+  // ==========================================================================
+  const VIEW_STATE_KEY = "SCHED_VIEW_V1";
+  const VIEW_STATE_MAX_AGE = 12 * 3600000;
+
+  function saveViewState() {
+    try {
+      localStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
+        ts: Date.now(),
+        weekStartISO: weekStart.toISOString(),
+        monthISO: localMonthISO(monthAnchor),
+        schedSub: subTabs.schedule
+      }));
+    } catch(_) {}
+  }
+
+  function restoreViewState() {
+    try {
+      const raw = localStorage.getItem(VIEW_STATE_KEY);
+      if (!raw) return;
+      const v = JSON.parse(raw);
+      if (!v || Date.now() - v.ts > VIEW_STATE_MAX_AGE) return;
+      const w = new Date(v.weekStartISO);
+      if (!isNaN(w.getTime())) weekStart = snapToMonday(w);
+      const m = new Date(v.monthISO);
+      if (!isNaN(m.getTime())) monthAnchor = m;
+      if (["week", "month", "grid"].indexOf(v.schedSub) >= 0) subTabs.schedule = v.schedSub;
+    } catch(_) {}
+  }
+  restoreViewState();
 
   let renderTimer = null;
 
@@ -841,8 +888,14 @@
     }
   }
 
+  // v3.22 2026-09-03 — anything saved to this device before an edit is no
+  // longer trustworthy, so stop painting from it. The week already on screen
+  // stays put while the fresh copy loads; we just don't reach back to disk for
+  // a copy that predates the change the user just made.
+  let snapshotFloor = 0;
   function invalidateAll() {
     apiCache.clear();
+    snapshotFloor = Date.now();
   }
 
   function updateConnStatus(online) {
@@ -873,16 +926,33 @@
   // returning user sees their schedule immediately while fresh data is
   // fetched behind it (stale-while-revalidate).
   // ==========================================================================
-  const INIT_CACHE_KEY = "SCHED_INIT_V1";
+  const INIT_CACHE_KEY = "SCHED_INIT_V2";   // v3.22 2026-09-03 — see below
   const INIT_CACHE_MAX_AGE = 7 * 86400000; // a week-old snapshot is still a useful first paint
+
+  // ==========================================================================
+  // v3.22 2026-09-03 — Never open on an empty week
+  // The v3.15 snapshot only paid off when you reopened the app on the exact
+  // same week you last viewed; on a Monday, or after tapping ◀/▶ before
+  // closing, it missed and you got a blank/skeleton screen until Apps Script
+  // answered. Split in two:
+  //   SCHED_INIT_V2  — bootstrap + todos + templates (not tied to a week), so
+  //                    the chrome, nav and task data are up instantly always.
+  //   SCHED_WEEKS_V1 — the last N weeks/months of schedule data, keyed exactly
+  //                    like schedCacheKey(), so ANY recently-viewed week paints
+  //                    from disk while the fresh copy loads behind it.
+  // ==========================================================================
+  const WEEK_CACHE_KEY = "SCHED_WEEKS_V1";
+  const WEEK_CACHE_MAX = 12;                  // ~3 months of paging around
+  const WEEK_CACHE_MAX_AGE = 21 * 86400000;
 
   function writeInitCache(payload) {
     try {
       localStorage.setItem(INIT_CACHE_KEY, JSON.stringify({
         ts: Date.now(),
-        weekStartISO: weekStart.toISOString(),
         token: sessionToken,
-        payload: payload
+        bootstrap: payload.bootstrap,
+        todos: payload.todos || { items: [] },
+        templates: payload.templates || { items: [] }
       }));
     } catch(_) { /* quota / private mode — caching is optional */ }
   }
@@ -892,17 +962,59 @@
       const raw = localStorage.getItem(INIT_CACHE_KEY);
       if (!raw) return null;
       const c = JSON.parse(raw);
-      // Only reuse it for the same session and the same week we're showing,
-      // otherwise the shifts on screen would be for the wrong dates.
-      if (!c || c.token !== sessionToken) return null;
-      if (c.weekStartISO !== weekStart.toISOString()) return null;
+      if (!c || c.token !== sessionToken || !c.bootstrap) return null;
       if (Date.now() - c.ts > INIT_CACHE_MAX_AGE) return null;
-      return c.payload;
+      // Shaped like an initLoad payload so applyInitPayload() can take it as-is.
+      // The schedule half comes from the per-week store instead.
+      return {
+        bootstrap: c.bootstrap,
+        schedule: readSchedSnapshot(schedCacheKey('week')) || null,
+        todos: c.todos,
+        templates: c.templates
+      };
     } catch(_) { return null; }
   }
 
   function clearInitCache() {
     try { localStorage.removeItem(INIT_CACHE_KEY); } catch(_) {}
+    try { localStorage.removeItem(WEEK_CACHE_KEY); } catch(_) {}
+  }
+
+  function readWeekStore() {
+    try {
+      const raw = localStorage.getItem(WEEK_CACHE_KEY);
+      if (!raw) return null;
+      const st = JSON.parse(raw);
+      if (!st || st.token !== sessionToken || !st.entries) return null;
+      return st;
+    } catch(_) { return null; }
+  }
+
+  // Last saved copy of one week/month, or null. Never used once a fresh copy
+  // is in memory — only to fill the screen while that fresh copy is in flight.
+  function readSchedSnapshot(key) {
+    const st = readWeekStore();
+    const e = st && st.entries[key];
+    if (!e) return null;
+    if (Date.now() - e.ts > WEEK_CACHE_MAX_AGE) return null;
+    if (e.ts < snapshotFloor) return null;      // v3.22 2026-09-03
+    return e.data;
+  }
+
+  function writeSchedSnapshot(key, data) {
+    if (!data) return;
+    try {
+      const st = readWeekStore() || { token: sessionToken, entries: {} };
+      st.token = sessionToken;
+      st.entries[key] = { ts: Date.now(), data: data };
+      const keys = Object.keys(st.entries);
+      if (keys.length > WEEK_CACHE_MAX) {
+        keys.sort((a, b) => st.entries[a].ts - st.entries[b].ts)
+            .slice(0, keys.length - WEEK_CACHE_MAX)
+            .forEach(k => delete st.entries[k]);
+      }
+      localStorage.setItem(WEEK_CACHE_KEY, JSON.stringify(st));
+    } catch(_) { /* quota — dropping the oldest above usually clears it */ }
   }
 
   // Fans an initLoad payload out into module state and seeds apiCache under
@@ -910,16 +1022,23 @@
   // first render costs zero extra round trips.
   function applyInitPayload(p) {
     bootstrap = p.bootstrap;
-    const sched = p.schedule || { shifts: [] };
+    const sched = p.schedule || null;
     const todos = p.todos || { items: [] };
     const templates = p.templates || { items: [] };
 
-    globalShifts = sched.shifts || [];
     todosCache = todos.items || [];
     templatesCache = templates.items || [];
 
     const now = Date.now();
-    apiCache.set(schedCacheKey('week'), { data: sched, ts: now });
+    // v3.22 2026-09-03 — a cached bootstrap with no saved copy of THIS week is
+    // still worth applying (nav, brand and tasks paint at once); renderSchedule
+    // then fetches just the week. Don't seed an empty schedule into the cache,
+    // or the week would render as "No shifts scheduled" and stay that way.
+    if (sched) {
+      globalShifts = sched.shifts || [];
+      apiCache.set(schedCacheKey('week'), { data: sched, ts: now });
+      writeSchedSnapshot(schedCacheKey('week'), sched);
+    }
     apiCache.set("listTodos:" + JSON.stringify({ sessionToken }), { data: todos, ts: now });
     apiCache.set("listTemplates:" + JSON.stringify({ sessionToken }), { data: templates, ts: now });
 
@@ -943,16 +1062,25 @@
         applyInitPayload(cached);
         applyBrand();
         renderNav();
-        render(false); // false: the cache we just seeded IS the data
-        maybeShowOnShift().catch(() => {});
-        painted = true;
+        // v3.22 2026-09-03 — with a saved copy of this week we paint the real
+        // schedule right away. Without one (first open on a week you've never
+        // viewed here) we still get the brand and nav up instantly, but we let
+        // the initLoad below fill the week rather than racing it with a second
+        // request for the same data.
+        if (cached.schedule) {
+          render(false); // false: the cache we just seeded IS the data
+          maybeShowOnShift().catch(() => {});
+          painted = true;
+        }
       } catch(e) {
         console.warn("Stale init paint failed, falling back to skeleton:", e);
         clearInitCache();
         painted = false;
       }
     }
-    if (!painted) showSkeleton(view, 4);
+    // v3.22 2026-09-03 — the real week with placeholder rows, not four grey
+    // bars, so a cold open never looks like an empty schedule.
+    if (!painted) view.innerHTML = schedScaffoldHtml(subTabs.schedule);
 
     try {
       const payload = await api("initLoad", { sessionToken, weekStartISO: weekStart.toISOString() });
@@ -1018,7 +1146,12 @@
     if (!view) return;
     view.style.display = "block";
 
-    if (!view.innerHTML.trim()) showSkeleton(view);
+    if (!view.innerHTML.trim()) {
+      // v3.22 2026-09-03 — the Schedule tab gets the dated week scaffold; other
+      // tabs keep the generic shimmer.
+      if (activeTab === "schedule") view.innerHTML = schedScaffoldHtml(subTabs.schedule);
+      else showSkeleton(view);
+    }
 
     if (forceFetch) {
       invalidateAll();
@@ -1048,6 +1181,7 @@
       }
     } finally {
       clearViewLoading();
+      scrollToTodayPending = false; // v3.21 2026-08-23
     }
   }
 
@@ -1348,18 +1482,154 @@
     return iso ? new Date(iso).getTime() : 0;
   }
 
+  // ==========================================================================
+  // v3.22 2026-09-03 — The week is never blank while it loads
+  // Shown only when there is genuinely nothing cached for this week (first
+  // ever load, or a week never opened on this device). It has the real dates
+  // and the real nav, with a shimmer where each day's shifts will land, so it
+  // reads as "loading" and never as "this week has nothing on it".
+  // ==========================================================================
+  function schedScaffoldHtml(mode) {
+    return '<div data-scaffold="' + esc(schedCacheKey(mode)) + '">' + schedScaffoldBody(mode) + '</div>';
+  }
+
+  function schedScaffoldBody(mode) {
+    const label = mode !== 'month'
+      ? `${fmtDate(weekStart)} – ${fmtDate(addDays(weekStart, 6))}`
+      : monthAnchor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+
+    let h = `
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div class="row" style="gap:4px">
+            <button class="btn small" disabled>◀</button>
+            <button class="btn small" disabled>Today</button>
+            <button class="btn small" disabled>▶</button>
+          </div>
+          <div style="font-weight:700; font-size:14px; text-align:right">${esc(label)}</div>
+        </div>
+        <div class="muted" style="margin-top:10px; font-size:12px; text-align:center">Loading schedule…</div>
+      </div>`;
+
+    if (mode === 'month' || mode === 'grid') {
+      h += Array(4).fill('<div class="skeleton" style="height:96px"></div>').join('');
+      return h;
+    }
+
+    for (let i = 0; i < 7; i++) {
+      const d = addDays(weekStart, i);
+      const isToday = isoDate(d) === isoDate(new Date());
+      h += `<div class="card" style="padding:12px; margin-bottom:10px;">
+        <div class="day-header ${isToday ? 'today' : ''}">
+          <span class="day-name">${esc(d.toLocaleDateString(undefined, { weekday: 'long' }))}${isToday ? ' — Today' : ''}</span>
+          <span class="day-date">${esc(d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }))}</span>
+        </div>
+        <div class="skeleton row-ph"></div>
+      </div>`;
+    }
+    return h;
+  }
+
+  // v3.22 2026-09-03 — quietly warm the weeks on either side of the one being
+  // viewed, so ◀ and ▶ come back from memory instead of Apps Script. Debounced,
+  // so holding down the arrow doesn't queue up a request per press.
+  let prefetchTimer = null;
+  function prefetchNeighbors(mode) {
+    clearTimeout(prefetchTimer);
+    prefetchTimer = setTimeout(() => {
+      if (document.hidden) return;
+      const jobs = [];
+      for (const dir of [1, -1]) {
+        if (mode === 'month') {
+          const a = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + dir, 1);
+          const iso = localMonthISO(a);
+          jobs.push(["dashSchedule:month:" + iso,
+                     { sessionToken, mode: 'month', weekStartISO: weekStart.toISOString(), monthISO: iso }]);
+        } else {
+          const w = addDays(weekStart, dir * 7);
+          jobs.push(["dashSchedule:week:" + w.toISOString(),
+                     { sessionToken, mode: 'week', weekStartISO: w.toISOString(), monthISO: localMonthISO(monthAnchor) }]);
+        }
+      }
+      for (const [key, payload] of jobs) {
+        const hit = apiCache.get(key);
+        if (hit && Date.now() - hit.ts < SWR_MAX_AGE) continue;
+        if (inflightRequests.has(key)) continue;
+        api("dashSchedule", payload, { cache: true, cacheKey: key })
+          .then(d => writeSchedSnapshot(key, d))
+          .catch(() => {});
+      }
+    }, 900);
+  }
+
   // Schedule
   async function renderSchedule(el, rv) {
     const mode = subTabs.schedule;
     // v3.2 2026-07-18 — grid mode reuses the week fetch/cache
-    const dashData = await api("dashSchedule", {
+    const key = schedCacheKey(mode);
+    const reqData = {
       sessionToken,
       mode: mode === 'month' ? 'month' : 'week',
       weekStartISO: weekStart.toISOString(),
       monthISO: localMonthISO(monthAnchor)
-    }, { cache: true, cacheKey: schedCacheKey(mode) }); // v3.15 2026-08-02
+    };
 
-    if (rv !== renderVersion) return;
+    // ------------------------------------------------------------------
+    // v3.22 2026-09-03 — stale-while-revalidate.
+    // Anything we already have for this week goes on screen immediately —
+    // memory first, then the copy saved to this device — and the fresh copy
+    // is fetched behind it. Only a week we have never seen blocks, and even
+    // then the scaffold above is on screen while it loads. Previously every
+    // week change awaited dashSchedule and THEN awaited the task lists: two
+    // Apps Script round trips back to back before anything was painted.
+    // ------------------------------------------------------------------
+    const memHit = apiCache.get(key);
+    let dashData = memHit ? memHit.data : null;
+    let revalidate = !memHit || (Date.now() - memHit.ts > SWR_MAX_AGE);
+
+    if (!dashData) {
+      const snap = readSchedSnapshot(key);
+      if (snap) { dashData = snap; revalidate = true; }
+    }
+
+    if (!dashData) {
+      // Nothing at all for this week: show the real week with placeholder rows,
+      // then fetch the schedule and the task lists together rather than serially.
+      // Keep whatever real week is already on screen (it just dims) — only
+      // paint the scaffold over an empty view, or over a scaffold left from a
+      // different week.
+      const ph = el.querySelector('[data-scaffold]');
+      const hasRealWeek = el.querySelector('.day-header') && !ph;
+      if (!hasRealWeek && (!ph || ph.dataset.scaffold !== key)) {
+        el.innerHTML = schedScaffoldHtml(mode);
+      }
+      const [d] = await Promise.all([
+        api("dashSchedule", reqData, { cache: true, cacheKey: key }),
+        loadTodosSafe().catch(() => {})
+      ]);
+      if (rv !== renderVersion) return;
+      dashData = d;
+      writeSchedSnapshot(key, d);
+      revalidate = false;
+    } else if (revalidate) {
+      const before = JSON.stringify(dashData) + "|" + JSON.stringify(todosCache);
+      apiCache.delete(key);                       // force a real fetch, not the stale hit
+      Promise.all([
+        api("dashSchedule", reqData, { cache: true, cacheKey: key }),
+        loadTodosSafe().catch(() => {})
+      ]).then(([d]) => {
+        writeSchedSnapshot(key, d);
+        if (rv !== renderVersion) return;         // user moved on; the cache is still warmed
+        // Only repaint if something actually changed, so a background refresh
+        // never flickers the week out from under whoever is reading it.
+        if (JSON.stringify(d) + "|" + JSON.stringify(todosCache) !== before) render(false);
+      }).catch(() => {});
+    } else {
+      await loadTodosSafe();                      // in-memory hit: returns with no fetch
+      if (rv !== renderVersion) return;
+    }
+
+    prefetchNeighbors(mode);
 
     const schedData = dashData || {};                 // v3.20 2026-08-23 — defensive:
     const bullData = (dashData && dashData.bulletin) || {}; // a partial payload used to
@@ -1367,9 +1637,6 @@
 
     globalShifts = schedData.shifts || [];
 
-    // v3 2026-07-18 — load tasks so shift cards & day strips can show them
-    await loadTodosSafe();
-    if (rv !== renderVersion) return;
     syncShiftTaskAssignees();
     buildTaskMaps();
 
@@ -1474,7 +1741,7 @@
         const dayName = d.toLocaleDateString(undefined, {weekday:'long'});
         const dayDateStr = d.toLocaleDateString(undefined, {month:'short', day:'numeric'});
 
-        dayCards.push(`<div class="card" style="padding:12px; margin-bottom:10px;">
+        dayCards.push(`<div class="card" style="padding:12px; margin-bottom:10px;"${isToday ? ' data-today="1"' : ''}>
           <div class="day-header ${isToday ? 'today' : ''}">
             <span class="day-name">${esc(dayName)}${isToday ? ' — Today' : ''}</span>
             <span class="day-date">${esc(dayDateStr)}</span>
@@ -1526,7 +1793,7 @@
           const isToday = k === todayIso;
           const mDayName = bDate.toLocaleDateString(undefined, {weekday:'long'});
           const mDayDate = bDate.toLocaleDateString(undefined, {month:'short', day:'numeric'});
-          html += `<div style="margin-bottom:12px; border:1px solid var(--border); border-radius:12px; padding:10px;">
+          html += `<div style="margin-bottom:12px; border:1px solid var(--border); border-radius:12px; padding:10px;"${isToday ? ' data-today="1"' : ''}>
             <div style="display:flex; justify-content:space-between; align-items:center; padding-bottom:8px; margin-bottom:8px; border-bottom:1px solid var(--border); ${isToday ? 'color:var(--accent);' : ''}">
               <span style="font-weight:800; font-size:14px;">${esc(mDayName)}${isToday ? ' — Today' : ''}</span>
               <span style="font-size:12px; font-weight:600; color:var(--muted);">${esc(mDayDate)}</span>
@@ -1540,6 +1807,13 @@
     }
 
     el.innerHTML = html;
+
+    // v3.21 2026-08-23 — "Today" scrolls today's card to the top of the list
+    // instead of just re-rendering the same week you were already looking at.
+    if (scrollToTodayPending) {
+      scrollToTodayPending = false;
+      requestAnimationFrame(scrollTodayIntoView);
+    }
   }
 
   // ==========================================================================
@@ -2285,7 +2559,7 @@
     }
   });
 
-  function setSub(tab, val) { subTabs[tab] = val; showViewLoading(); render(); }
+  function setSub(tab, val) { subTabs[tab] = val; if (tab === 'schedule') saveViewState(); showViewLoading(); render(); } // v3.22 2026-09-03
 
   // ==========================================================================
   // v3.18 2026-08-02 — OFF-SITE WORK HOURS
@@ -2573,10 +2847,29 @@
 
     if (isWeekMode) weekStart = addDays(weekStart, dir * 7);
     else monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + dir, 1);
+    saveViewState();                       // v3.22 2026-09-03
     showViewLoading();
-    render(true);
+    // v3.22 2026-09-03 — was render(true), which called invalidateAll() and
+    // threw away every already-loaded week plus the task lists, so stepping
+    // ◀ then ▶ back re-fetched a week that was already in hand. renderSchedule
+    // now revalidates stale weeks in the background instead.
+    render(false);
   }
+  // v3.21 2026-08-23 — scroll today's day card under the sticky header.
+  let scrollToTodayPending = false;
+  function scrollTodayIntoView() {
+    const target = document.querySelector('[data-today="1"]');
+    if (!target) return;
+    const header = document.querySelector('header');
+    const offset = (header ? header.getBoundingClientRect().height : 0) + 8;
+    const y = target.getBoundingClientRect().top + window.pageYOffset - offset;
+    window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
+  }
+
   function jumpToday() {
+    // v3.21 2026-08-23 — only the Schedule tab has a day list to scroll to;
+    // _render() clears the flag either way so it can't fire on a later render.
+    scrollToTodayPending = (activeTab === 'schedule');
     // v3.20 2026-08-23 — snap back to Monday. Without this, "Today"/"This Week"
     // left weekStart on whatever weekday it was, so the schedule and the
     // Mon–Sun payroll summary drifted off the payroll week.
@@ -2584,8 +2877,9 @@
     weekStart.setHours(0,0,0,0);
     weekStart = snapToMonday(weekStart);
     monthAnchor = new Date();
+    saveViewState();                       // v3.22 2026-09-03
     showViewLoading();
-    render(true);
+    render(false);                         // v3.22 2026-09-03 — see moveDate()
   }
 
   window.toggleMyShifts = function(el) {
@@ -3209,7 +3503,7 @@
     }
   };
 
-  function logout() { localStorage.removeItem("SCHED_SESSION"); clearInitCache(); location.reload(); } // v3.15 2026-08-02
+  function logout() { localStorage.removeItem("SCHED_SESSION"); clearInitCache(); try { localStorage.removeItem(VIEW_STATE_KEY); } catch(_) {} location.reload(); } // v3.15 2026-08-02, v3.22 2026-09-03
 
   function renderNav() {
     document.getElementById("navTabs").style.display = "flex";
@@ -3286,10 +3580,18 @@
   }
   function stopPoller() { if (pollerId) { clearInterval(pollerId); pollerId = null; } }
 
+  // v3.22 2026-09-03 — coming back to the tab used to run render(true), which
+  // wiped the entire cache and blocked on a fresh fetch, so a glance away and
+  // back cost a full reload. Now: nothing at all for a short absence, and for
+  // a longer one the stale copy stays on screen while the schedule and tasks
+  // refresh behind it.
+  let hiddenSince = 0;
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && bootstrap) {
-      render(true); 
-    }
+    if (document.hidden) { hiddenSince = Date.now(); return; }
+    if (!bootstrap) return;
+    if (hiddenSince && Date.now() - hiddenSince < SWR_MAX_AGE) return;
+    invalidateCache(["dashSchedule", "listTodos", "listTemplates", "dashOpen", "dashRequests"]);
+    render(false);
   });
 
   function fillSelect(id, opts, sel) {

@@ -275,3 +275,43 @@ causes, all fixed in index.html (no Apps Script redeploy needed):
 3. jumpToday() left weekStart on the current weekday instead of snapping to
    Monday, so "Today"/"This Week" could drift off the Mon–Sun payroll week.
 Also hardened renderSchedule() against a partial dashSchedule payload.
+
+v3.21 2026-08-23 — "Today" scrolls to today (frontend only):
+Pressing Today / This Week on the Schedule tab now scrolls today's day card to
+the top of the list, just under the sticky header, instead of only re-rendering
+the current week. Today's card carries data-today="1"; jumpToday() arms a
+one-shot flag that renderSchedule() consumes after paint (and _render() always
+clears, so it can't fire on an unrelated render). Works in both Week View and
+the list view; the Staffing Grid has no day list, so it's a no-op there.
+
+v3.22 2026-09-03 — Fast schedule loading, never a blank week (frontend only,
+no Apps Script redeploy needed):
+Loading the Schedule tab used to cost two Apps Script round trips back to back
+(dashSchedule, then the task lists) with nothing on screen in between, and the
+30-second cache plus render(true) on every ◀/▶ meant almost nothing was ever
+reused. Five changes in index.html:
+ 1. Stale-while-revalidate. Any week already in memory — or saved to the device
+    in SCHED_WEEKS_V1 (last 12 weeks/months, keyed like schedCacheKey) — paints
+    immediately while the fresh copy loads behind it. A background refresh only
+    repaints if the data actually changed, so it never flickers.
+ 2. One round trip instead of two. dashSchedule and the task lists are fetched
+    together with Promise.all rather than one after the other.
+ 3. Nothing is ever blank. A week with no cached copy shows schedScaffoldHtml()
+    — the real dates, the real day cards, a shimmer where shifts will land and
+    "Loading schedule…" — and navigating away from a loaded week keeps that week
+    on screen (dimmed to 0.65, was 0.4) until the next one arrives. The bare
+    grey-bar skeleton is gone from the Schedule tab.
+ 4. Caching that holds. CACHE_TTL 30s → 120s; SWR_MAX_AGE 60s. moveDate() and
+    jumpToday() call render(false), not render(true) — render(true) ran
+    invalidateAll() and threw away every loaded week plus the task lists.
+    Returning to the tab after less than a minute now costs nothing at all;
+    a longer absence refreshes behind the visible week instead of blocking.
+    prefetchNeighbors() warms the weeks either side (debounced 900ms), so ◀/▶
+    usually come back from memory. Editing anything still forces a real fetch —
+    invalidateAll() sets snapshotFloor so pre-edit saved copies are never shown.
+ 5. Refresh keeps your place. The week/month and Week/Month/Grid choice are
+    saved in SCHED_VIEW_V1 and restored for 12 hours, so reloading mid-way
+    through building next month's schedule no longer snaps back to this week.
+    "Today" still jumps back to the current week; logging out clears it.
+Init cache is now SCHED_INIT_V2 (bootstrap + tasks, no longer tied to one week),
+so the nav and brand are up instantly even on a week you've never opened here.
