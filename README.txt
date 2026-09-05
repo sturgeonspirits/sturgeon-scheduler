@@ -330,3 +330,25 @@ Editing is unchanged: managers are still the only ones who can write a note.
 The form label now reads "Notes (visible to everyone)" so that's obvious while
 typing. Redeploy the Apps Script web app after pasting the updated code.gs —
 the staff-facing change only takes effect once the backend is redeployed.
+
+v3.25 2026-09-05 — Event staffing check (frontend + backend v7.2):
+Toast Catering & Events syncs bookings into the staff account's Google
+Calendar (sturgeonspiritsstaff@gmail.com), but Toast has no idea who works an
+event — the covering shift only exists in this app, created by hand, with
+nothing linking it back. New manager-only "Events needing staff" card at the
+top of the Schedule tab grades every event in the next 60 days:
+ - NEEDS SHIFTS — nothing at that space and time. "Create shift" opens the
+   shift modal pre-filled with the event's date, time, space and name.
+ - UNCLAIMED — a shift exists but it's still OPEN. This is the one that used
+   to slip through: a shift is there, so the schedule looks covered, but
+   nobody has taken it. "Go to week" jumps to it.
+ - STAFFED — a named person is on it. Card collapses to "all N staffed".
+Matching is on EVENT SPACE + time overlap, not time alone. Toast writes
+"Event space: Ready Room" into the description, which matches LOCATIONS
+exactly. Time-only matching reported every event as covered, because someone
+is always bartending somewhere in the building.
+Toast's tentative orders are flagged; customer names, emails, phones, invoice
+links and totals are manager-only and never sent to staff.
+The card loads after the schedule paints and never blocks it (v3.22/v3.23
+rules). Requires the events calendar to be shared with the account the Apps
+Script runs as. Redeploy the Apps Script web app after pasting code.gs.

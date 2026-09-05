@@ -118,6 +118,20 @@
     .badge.swap-pending { background:#e8a030; color:#fff; }
     .shift.swap-item { border-left:3px solid #e8a030; }
 
+    /* v3.25 2026-09-05 — Toast event staffing card (managers only) */
+    .ev-row { border:1px solid var(--border); border-left-width:4px; border-radius:8px; padding:8px 10px; margin-bottom:8px; background:#fff; }
+    .ev-row.unstaffed { border-left-color:var(--danger); }
+    .ev-row.unclaimed { border-left-color:#e8a030; }
+    .ev-row.staffed   { border-left-color:var(--ok); }
+    .ev-title { font-weight:700; font-size:13px; }
+    .ev-meta  { font-size:11px; color:var(--muted); margin-top:2px; }
+    .ev-note  { font-size:11px; margin-top:4px; padding:3px 6px; background:#FBF6E9; border-radius:4px; }
+    .ev-pill  { font-size:10px; font-weight:800; padding:2px 6px; border-radius:4px; text-transform:uppercase; letter-spacing:0.5px; }
+    .ev-pill.unstaffed { background:var(--danger); color:#fff; }
+    .ev-pill.unclaimed { background:#e8a030; color:#fff; }
+    .ev-pill.staffed   { background:var(--ok); color:#fff; }
+    .ev-pill.tentative { background:var(--muted); color:#fff; }
+
     .event-banner { background:var(--accent); color:#fff; border-radius:8px; padding:8px 12px; margin-bottom:12px; text-align:center; font-weight:800; font-size:13px; text-transform:uppercase; letter-spacing:1px; box-shadow:0 2px 6px rgba(150,50,31,0.3); }
 
     /* Admin-only: staff unavailability marker on the schedule. Deliberately
@@ -901,6 +915,7 @@
   function invalidateAll() {
     apiCache.clear();
     snapshotFloor = Date.now();
+    eventsCache = null;   // v3.25 2026-09-05
   }
 
   function updateConnStatus(online) {
@@ -1765,6 +1780,11 @@
       </div>
     `;
 
+    // v3.25 2026-09-05 — Toast event staffing. Rendered into a placeholder and
+    // filled after paint, so it can never delay or block the week (see the
+    // v3.22/v3.23 rules — the schedule paints first, always).
+    if (bootstrap.me.isManager) html += `<div id="eventsCard"></div>`;
+
     if (mode === 'grid') {
       // v3.2 2026-07-18 — desktop weekly staffing grid
       html += renderStaffingGrid(activeSwaps);
@@ -1880,6 +1900,9 @@
     }
 
     el.innerHTML = html;
+
+    // v3.25 2026-09-05 — non-blocking; failures leave the card empty
+    if (bootstrap.me.isManager) loadEventsCard().catch(() => {});
 
     // v3.21 2026-08-23 — "Today" scrolls today's card to the top of the list
     // instead of just re-rendering the same week you were already looking at.
@@ -2497,6 +2520,103 @@
     }
   }
 
+  /**********************************************
+   * v3.25 2026-09-05 — TOAST EVENT STAFFING (managers only)
+   *
+   * Toast can't staff an event — the covering shift only exists in this app,
+   * created by hand. The backend infers the link from event space + time
+   * overlap and grades it staffed / unclaimed / unstaffed. "Unclaimed" is the
+   * state that bites: a shift exists, so a naive check calls it covered, but
+   * nobody has taken it.
+   **********************************************/
+  let eventsCache = null;
+
+  async function loadEventsCard() {
+    const el = document.getElementById("eventsCard");
+    if (!el || !bootstrap.me.isManager) return;
+    try {
+      const res = eventsCache || await api("listEvents", { sessionToken, days: 60 }, { cache: true });
+      eventsCache = res;
+      const cur = document.getElementById("eventsCard");
+      if (cur) cur.innerHTML = renderEventsCard(res);
+    } catch (e) {
+      const cur = document.getElementById("eventsCard");
+      if (cur) cur.innerHTML = "";
+    }
+  }
+
+  function renderEventsCard(res) {
+    if (!res || !res.ok || !Array.isArray(res.events)) return "";
+    const evs = res.events;
+    if (!evs.length) return "";
+
+    const needs = evs.filter(e => e.state !== "staffed");
+    const okCount = evs.length - needs.length;
+
+    if (!needs.length) {
+      return `<div class="card"><div class="row" style="justify-content:space-between">
+        <div style="font-weight:700; font-size:14px">Events</div>
+        <span class="ev-pill staffed">all ${okCount} staffed</span>
+      </div></div>`;
+    }
+
+    const rows = needs.map(e => {
+      const st = new Date(e.startISO);
+      const en = e.endISO ? new Date(e.endISO) : null;
+      const when = `${st.toLocaleDateString(undefined,{weekday:'short', month:'short', day:'numeric'})} · ${fmtTime(st)}${en ? ' – ' + fmtTime(en) : ''}`;
+      const bits = [e.space || 'space not set', e.guests ? e.guests + ' guests' : '', e.occasion]
+        .filter(Boolean).join(' · ');
+
+      const label = e.state === "unstaffed" ? "needs shifts" : "unclaimed";
+      const openTxt = (e.openShifts || []).map(o => `${o.task} — OPEN`).join(", ");
+
+      const action = e.state === "unstaffed"
+        ? `<button class="btn accent small js-ev-create"
+             data-date="${esc(isoDate(st))}"
+             data-start="${esc(fmtTime24(st))}"
+             data-end="${esc(en ? fmtTime24(en) : '')}"
+             data-loc="${esc(e.space || '')}"
+             data-notes="${esc(e.title + (e.notes ? ' — ' + e.notes : ''))}">Create shift</button>`
+        : `<button class="btn small js-ev-week" data-date="${esc(isoDate(st))}">Go to week</button>`;
+
+      return `
+        <div class="ev-row ${esc(e.state)}">
+          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:8px">
+            <div style="flex:1; min-width:0">
+              <div class="ev-title">${esc(e.title)}</div>
+              <div class="ev-meta">${esc(when)}</div>
+              <div class="ev-meta">${esc(bits)}</div>
+              ${openTxt ? `<div class="ev-meta">${esc(openTxt)}</div>` : ''}
+              ${e.notes ? `<div class="ev-note">${esc(e.notes)}</div>` : ''}
+            </div>
+            <div style="text-align:right; flex-shrink:0">
+              <div><span class="ev-pill ${esc(e.state)}">${esc(label)}</span></div>
+              ${/^tentative$/i.test(e.orderStatus || '') ? `<div style="margin-top:4px"><span class="ev-pill tentative">tentative</span></div>` : ''}
+              <div style="margin-top:6px">${action}</div>
+            </div>
+          </div>
+        </div>`;
+    }).join("");
+
+    return `
+      <div class="card">
+        <div class="row" style="justify-content:space-between; margin-bottom:10px">
+          <div style="font-weight:700; font-size:14px">Events needing staff</div>
+          <span class="muted" style="font-size:11px">${needs.length} of ${evs.length} · next 60 days</span>
+        </div>
+        ${rows}
+      </div>`;
+  }
+
+  // v3.25 2026-09-05 — jump the schedule to the week holding a given date
+  function goToEventWeek(iso) {
+    const d = new Date(iso + "T12:00:00");
+    weekStart = snapToMonday(new Date(d.setHours(0,0,0,0)));
+    monthAnchor = new Date(weekStart);
+    saveViewState();
+    render(false);
+  }
+
   function renderShiftItem(s) {
     const canEdit = bootstrap.me.isManager;
 
@@ -2606,6 +2726,25 @@
       addFromTemplate(tChip.dataset.id, tChip);
       return;
     }
+    // v3.25 2026-09-05 — event staffing card actions
+    const evCreate = e.target.closest('.js-ev-create');
+    if (evCreate) {
+      openShiftModal(null, false, {
+        date:     evCreate.dataset.date,
+        start:    evCreate.dataset.start,
+        end:      evCreate.dataset.end,
+        location: evCreate.dataset.loc,
+        task:     "Bartender",
+        notes:    evCreate.dataset.notes
+      });
+      return;
+    }
+    const evWeek = e.target.closest('.js-ev-week');
+    if (evWeek) {
+      goToEventWeek(evWeek.dataset.date);
+      return;
+    }
+
     const note = e.target.closest('.js-note');
     if (note && bootstrap.me.isManager) {
       openNoteModal(note.dataset.date, note.dataset.text);
@@ -3283,7 +3422,9 @@
     if (chk) document.getElementById("fStaffBox").style.display = chk.checked ? "none" : "block";
   }
 
-  function openShiftModal(eid, precheckOpen = false) {
+  // v3.25 2026-09-05 — `prefill` lets the event card open this modal with the
+  // event's date, time and space already filled in.
+  function openShiftModal(eid, precheckOpen = false, prefill = null) {
     editing = eid;
     document.getElementById("mShiftTitle").textContent = eid ? "Edit Shift" : "Add Shift";
     document.getElementById("btnDelShift").style.display = eid ? "block" : "none";
@@ -3315,6 +3456,16 @@
       document.getElementById("fEnd").value = "17:00";
       document.getElementById("fOpenEnded").checked = false;
       document.getElementById("fNotes").value = "";
+
+      // v3.25 2026-09-05 — prefill from a Toast event
+      if (prefill) {
+        if (prefill.date)     document.getElementById("fDate").value = prefill.date;
+        if (prefill.start)    document.getElementById("fStart").value = prefill.start;
+        if (prefill.end)      document.getElementById("fEnd").value = prefill.end;
+        if (prefill.location) document.getElementById("fLocation").value = prefill.location;
+        if (prefill.task)     document.getElementById("fTask").value = prefill.task;
+        if (prefill.notes)    document.getElementById("fNotes").value = prefill.notes;
+      }
     }
 
     toggleOpenEnded();

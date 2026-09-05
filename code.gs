@@ -1,5 +1,13 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v7.2 — Event staffing check. Toast Catering & Events syncs into the
+ *        staff account's calendar, but Toast has no idea who works an
+ *        event — the covering shift only exists in this app. New
+ *        listEvents action reads that calendar and grades each event
+ *        against the Shifts sheet by EVENT SPACE + time overlap, so a
+ *        bartender in the Tasting Room no longer counts as covering a
+ *        Ready Room event. Three states: staffed / unclaimed / unstaffed.
+ *        Customer contact details are manager-only (2026-09-05)
  * v7.1 — Shift notes go to everyone. _cleanShift_ sent notes:"" to anyone
  *        who wasn't a manager, so a note written for the person working
  *        the shift never reached them in the app — even though it was
@@ -57,6 +65,11 @@ const API_KEY = "SSCHED_9f3c7c1b5e9a4c6aa2f2d7a9c84b1e6d";
 // v6.6 2026-07-19 — added "Food Prep" shift role (food service launch)
 const TASKS = ["Bartender", "Bar back", "Server", "Food Prep", "On-call", "Production", "Marketing", "Distribution"];
 const LOCATIONS = ["Distillery", "Tasting Room", "Ready Room", "On the Lake", "Offsite"];
+// v7.2 2026-09-05 — Toast Catering & Events syncs to the staff account's
+// PRIMARY calendar (Toast authorizes an account, it can't target a calendar).
+// Read-only here. Must be shared with the account this script runs as.
+const EVENTS_CALENDAR_ID = "sturgeonspiritsstaff@gmail.com";
+
 const TZ_CENTRAL = "America/Chicago";
 
 // v7.0 2026-08-02 — Off-site work categories (TimeLog). Kept separate from
@@ -337,6 +350,7 @@ function _route_(action, data) {
     case "dashOpen":      return api_dashboardOpen(data);
     case "dashRequests":  return api_dashboardRequests(data);
     case "dashAdmin":     return api_dashboardAdmin(data);
+    case "listEvents":    return api_listEvents(data); // v7.2 2026-09-05
     case "bootstrap":        return api_bootstrap(data);
     case "initLoad":         return api_initLoad(data); // v6.8 2026-08-02
     case "listWeek":         return api_listWeek(data);
@@ -2866,4 +2880,140 @@ function _assertNoHardConflicts_(email, s, e, xId) {
       throw new Error("CONFLICT|unavail|" + staffName + "|" + (r.reason || "Unavailable") + "|" + _fmtCentral_(r.startISO) + "|" + _fmtCentral_(r.endISO));
     }
   }
+}
+
+/**********************************************
+ * v7.2 2026-09-05 — EVENT STAFFING CHECK
+ *
+ * Toast Catering & Events pushes bookings into EVENTS_CALENDAR_ID via its
+ * one-way Google Calendar sync. Toast has no concept of our staff, so the
+ * shift that actually covers an event exists only in this app — created by
+ * hand, with nothing linking it back to the event.
+ *
+ * This infers the link from EVENT SPACE + time overlap. Space matters:
+ * someone is always bartending somewhere, so a time-only test reports every
+ * event as covered forever. Toast writes "Event space: Ready Room" into the
+ * description, which matches LOCATIONS exactly.
+ **********************************************/
+
+/** Pull the structured fields out of a Toast-synced event description. */
+function _parseToastEvent_(desc) {
+  const d = String(desc || "").replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "");
+  const one = (re) => { const m = d.match(re); return m ? String(m[1]).trim() : ""; };
+
+  // Customer block: everything between "Customer info:" and the next divider.
+  let customer = { name: "", email: "", phone: "" };
+  const cust = d.match(/Customer info:\s*\n([\s\S]*?)(?:\n\s*-{3,}|$)/i);
+  if (cust) {
+    const lines = cust[1].split("\n").map(l => l.trim())
+      .filter(l => l && l !== "null" && !/^-+$/.test(l) && l !== "," && l !== "null, null");
+    lines.forEach(l => {
+      if (!customer.email && /@/.test(l)) customer.email = l;
+      else if (!customer.phone && /\d{3}.*\d{4}/.test(l) && !/@/.test(l)) customer.phone = l;
+      else if (!customer.name) customer.name = l;
+    });
+  }
+
+  return {
+    eventNo:       one(/^Event #(\S+)/m),
+    orderStatus:   one(/^Catering order status:\s*(.+)$/m),
+    invoiceNo:     one(/^Invoice #(\S+)/m),
+    invoiceStatus: one(/^Invoice status:\s*(.+)$/m),
+    invoiceUrl:    one(/^Invoice:\s*(\S+)$/m),
+    orderUrl:      one(/^Order:\s*(\S+)$/m),
+    space:         one(/^Event space:\s*(.+)$/m),
+    guests:        one(/^Guest count:\s*(\d+)/m),
+    occasion:      one(/^Occasion:\s*(.+)$/m),
+    // v7.2 2026-09-05 — Toast puts real operational detail in Notes ("They
+    // want Malort"), wrapped in HTML. Tags are stripped above.
+    // [ \t]* deliberately, NOT \s*: with an empty Notes field \s* eats the
+    // newlines, the non-greedy body then backtracks past the divider and
+    // swallows the whole price list. Verified against all six live events.
+    notes:         (function () {
+                     let m = d.match(/^Notes:[ \t]*\n?([\s\S]*?)\n\s*-{3,}/m);
+                     if (!m) m = d.match(/^Notes:[ \t]*(.*)$/m);
+                     const v = m ? String(m[1]).trim() : "";
+                     return /-{3,}/.test(v) ? "" : v;
+                   })(),
+    total:         one(/Total\s*=\s*\$([\d,.]+)/),
+    customer:      customer
+  };
+}
+
+/**
+ * Grade every Toast event in [start, end) against the Shifts sheet.
+ * state: "unstaffed" (no shift at that space/time)
+ *        "unclaimed" (a shift exists but it's still OPEN)
+ *        "staffed"   (a named person is on it)
+ */
+function _eventsWithStaffing_(start, end, isManager) {
+  const cal = CalendarApp.getCalendarById(EVENTS_CALENDAR_ID);
+  if (!cal) return { ok: false, error: "Events calendar not readable by this script account.", events: [] };
+
+  const shifts = _getShiftsCached_().filter(r => r.startISO);
+
+  const events = cal.getEvents(start, end).map(e => {
+    const s = e.getStartTime(), en = e.getEndTime();
+    const meta = _parseToastEvent_(e.getDescription());
+
+    // A shift covers the event only if it overlaps in TIME and matches the
+    // event SPACE. With no space parsed we fall back to time alone and say so.
+    const spaceKnown = !!meta.space;
+    const overlapping = shifts.filter(r => {
+      const rs = new Date(r.startISO);
+      const re = new Date(r.endISO || r.startISO);
+      if (!(rs < en && re > s)) return false;
+      if (!spaceKnown) return true;
+      return String(r.location || "").trim().toLowerCase() === meta.space.toLowerCase();
+    });
+
+    const named = overlapping.filter(r => !_asBool_(r.isOpen) && r.staffName);
+    const open  = overlapping.filter(r =>  _asBool_(r.isOpen));
+
+    const out = {
+      calEventId: e.getId(),
+      title:      e.getTitle(),
+      startISO:   s.toISOString(),
+      endISO:     en ? en.toISOString() : "",
+      isAllDay:   e.isAllDayEvent(),
+      space:      meta.space,
+      spaceKnown: spaceKnown,
+      guests:     meta.guests,
+      occasion:   meta.occasion,
+      eventNo:    meta.eventNo,
+      orderStatus:   meta.orderStatus,
+      invoiceStatus: meta.invoiceStatus,
+      notes:         meta.notes,
+      state: named.length ? "staffed" : (open.length ? "unclaimed" : "unstaffed"),
+      staffed: named.map(r => ({ name: r.staffName, task: r.task, location: r.location })),
+      openShifts: open.map(r => ({ eventId: r.eventId, task: r.task, location: r.location,
+                                   startISO: r.startISO, endISO: r.endISO }))
+    };
+
+    // Customer contact details and money links are manager-only. Shift notes
+    // now go to every staff member (v7.1), so this must not ride along there.
+    if (isManager) {
+      out.customer   = meta.customer;
+      out.invoiceUrl = meta.invoiceUrl;
+      out.orderUrl   = meta.orderUrl;
+      out.invoiceNo  = meta.invoiceNo;
+      out.total      = meta.total;
+    }
+    return out;
+  });
+
+  events.sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+  return { ok: true, events: events };
+}
+
+/** Manager-only: upcoming Toast events and whether they still need staffing. */
+function api_listEvents(data) {
+  const me = _requireSession_(data.sessionToken);
+  if (!me.isManager) throw new Error("Managers only");
+
+  const start = data.startISO ? new Date(data.startISO) : new Date();
+  const days  = Math.min(Number(data.days || 60), 365);
+  const end   = data.endISO ? new Date(data.endISO) : new Date(start.getTime() + days * 86400000);
+
+  return _eventsWithStaffing_(start, end, true);
 }
