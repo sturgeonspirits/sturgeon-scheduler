@@ -109,6 +109,9 @@
     .shift { background:#fff; border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; transition:opacity 0.2s; }
     .shift-main { font-weight:700; font-size:14px; margin-bottom:2px; }
     .shift-sub { font-size:12px; color:var(--muted); }
+    /* v3.24 2026-09-05 — shift notes now show to everyone, so they need to read
+       as a real message rather than another grey sub-line. */
+    .shift-note { font-size:12px; color:var(--text); background:#FBF6E9; border-left:3px solid var(--accent); border-radius:4px; padding:4px 8px; margin-top:6px; white-space:pre-wrap; word-break:break-word; }
     .badge { font-size:10px; font-weight:800; padding:2px 6px; border-radius:4px; background:#eee; color:#666; margin-left:6px; vertical-align:middle; }
     .badge.open { background:var(--accent); color:#fff; }
     .badge.swap { background:var(--muted); color:#fff; }
@@ -374,7 +377,9 @@
       <input type="checkbox" class="switch" id="fOpenEnded" onchange="toggleOpenEnded()">
     </div>
 
-    <label>Notes (Managers Only)</label><textarea id="fNotes" rows="2"></textarea>
+    <!-- v3.24 2026-09-05 — notes are shown to every staff member on the shift
+         card, so the label warns the manager typing it. -->
+    <label>Notes (visible to everyone)</label><textarea id="fNotes" rows="2" placeholder="Shown on the shift card to whoever works it"></textarea>
 
     <!-- v3 2026-07-18 — shift task checklist -->
     <div id="fTasksBox" style="margin-bottom:12px;">
@@ -990,6 +995,41 @@
     } catch(_) { return null; }
   }
 
+  // ==========================================================================
+  // v3.23 2026-09-04 — Never trust an empty week
+  // A busy or half-answered Apps Script call comes back as a perfectly
+  // well-formed { shifts: [] }. v3.22 cached that in memory for two minutes
+  // AND wrote it to the phone for three weeks, so a single backend hiccup
+  // turned into a schedule that read "No shifts scheduled" on every reload
+  // until the saved copy aged out — the real dates, none of the shifts.
+  // Empty payloads are still painted when they are all we have, but they are
+  // never saved to the device and never counted as fresh, so the next render
+  // always goes back to the server. A genuinely empty week costs one fetch.
+  // ==========================================================================
+  function schedCount(d) {
+    if (!d) return 0;
+    return (d.shifts || []).length + (d.swaps || []).length;
+  }
+
+  // Every schedule payload is stamped with the week/month it was fetched for,
+  // so a response that lands after the user has paged to another week can
+  // never be filed under — or painted as — the wrong week.
+  function stampSched(d, key) {
+    if (d && typeof d === 'object') { try { d.__k = key; } catch(_) {} }
+    return d;
+  }
+  function schedKeyOk(d, key) { return !d || !d.__k || d.__k === key; }
+
+  function dropSchedSnapshot(key) {
+    try {
+      const st = readWeekStore();
+      if (st && st.entries && st.entries[key]) {
+        delete st.entries[key];
+        localStorage.setItem(WEEK_CACHE_KEY, JSON.stringify(st));
+      }
+    } catch(_) {}
+  }
+
   // Last saved copy of one week/month, or null. Never used once a fresh copy
   // is in memory — only to fill the screen while that fresh copy is in flight.
   function readSchedSnapshot(key) {
@@ -998,11 +1038,16 @@
     if (!e) return null;
     if (Date.now() - e.ts > WEEK_CACHE_MAX_AGE) return null;
     if (e.ts < snapshotFloor) return null;      // v3.22 2026-09-03
+    if (!schedKeyOk(e.data, key)) return null;  // v3.23 2026-09-04
     return e.data;
   }
 
   function writeSchedSnapshot(key, data) {
     if (!data) return;
+    if (!schedKeyOk(data, key)) return;         // v3.23 2026-09-04 — wrong week
+    // v3.23 2026-09-04 — an empty answer is never saved, and it clears any
+    // good copy we had, so the next open re-asks instead of painting a blank.
+    if (!schedCount(data)) { dropSchedSnapshot(key); return; }
     try {
       const st = readWeekStore() || { token: sessionToken, entries: {} };
       st.token = sessionToken;
@@ -1020,7 +1065,12 @@
   // Fans an initLoad payload out into module state and seeds apiCache under
   // the exact keys renderSchedule()/loadTodosSafe() will look for, so the
   // first render costs zero extra round trips.
-  function applyInitPayload(p) {
+  // v3.23 2026-09-04 — the caller passes the week this payload was REQUESTED
+  // for. Recomputing it here filed a slow initLoad answer under whatever week
+  // the user had paged to in the meantime, which painted the right dates with
+  // none of the right shifts.
+  function applyInitPayload(p, weekKey) {
+    const wkKey = weekKey || schedCacheKey('week');
     bootstrap = p.bootstrap;
     const sched = p.schedule || null;
     const todos = p.todos || { items: [] };
@@ -1035,9 +1085,10 @@
     // then fetches just the week. Don't seed an empty schedule into the cache,
     // or the week would render as "No shifts scheduled" and stay that way.
     if (sched) {
+      stampSched(sched, wkKey);                 // v3.23 2026-09-04
       globalShifts = sched.shifts || [];
-      apiCache.set(schedCacheKey('week'), { data: sched, ts: now });
-      writeSchedSnapshot(schedCacheKey('week'), sched);
+      apiCache.set(wkKey, { data: sched, ts: now });
+      writeSchedSnapshot(wkKey, sched);
     }
     apiCache.set("listTodos:" + JSON.stringify({ sessionToken }), { data: todos, ts: now });
     apiCache.set("listTemplates:" + JSON.stringify({ sessionToken }), { data: templates, ts: now });
@@ -1059,7 +1110,7 @@
     const cached = readInitCache();
     if (cached) {
       try {
-        applyInitPayload(cached);
+        applyInitPayload(cached, schedCacheKey('week'));   // v3.23 2026-09-04
         applyBrand();
         renderNav();
         // v3.22 2026-09-03 — with a saved copy of this week we paint the real
@@ -1083,8 +1134,12 @@
     if (!painted) view.innerHTML = schedScaffoldHtml(subTabs.schedule);
 
     try {
-      const payload = await api("initLoad", { sessionToken, weekStartISO: weekStart.toISOString() });
-      applyInitPayload(payload);
+      // v3.23 2026-09-04 — pin the week we are asking about BEFORE the await,
+      // so paging while it loads can't file the answer under the wrong week.
+      const initWeekISO = weekStart.toISOString();
+      const initWeekKey = "dashSchedule:week:" + initWeekISO;
+      const payload = await api("initLoad", { sessionToken, weekStartISO: initWeekISO });
+      applyInitPayload(payload, initWeekKey);
       writeInitCache(payload);
       applyBrand();
       renderNav();
@@ -1220,7 +1275,7 @@
     // Load this week's shifts + tasks so we can detect a live shift
     await api("dashSchedule", { sessionToken, mode: 'week', weekStartISO: weekStart.toISOString() },
               { cache: true, cacheKey: schedCacheKey('week') }) // v3.15 2026-08-02
-      .then(d => { globalShifts = d.shifts || []; });
+      .then(d => { stampSched(d, schedCacheKey('week')); globalShifts = d.shifts || []; }); // v3.23 2026-09-04
     await loadTodosSafe();
     syncShiftTaskAssignees();
     buildTaskMaps();
@@ -1556,7 +1611,7 @@
         if (hit && Date.now() - hit.ts < SWR_MAX_AGE) continue;
         if (inflightRequests.has(key)) continue;
         api("dashSchedule", payload, { cache: true, cacheKey: key })
-          .then(d => writeSchedSnapshot(key, d))
+          .then(d => writeSchedSnapshot(key, stampSched(d, key)))   // v3.23 2026-09-04
           .catch(() => {});
       }
     }, 900);
@@ -1584,13 +1639,19 @@
     // Apps Script round trips back to back before anything was painted.
     // ------------------------------------------------------------------
     const memHit = apiCache.get(key);
-    let dashData = memHit ? memHit.data : null;
-    let revalidate = !memHit || (Date.now() - memHit.ts > SWR_MAX_AGE);
+    // v3.23 2026-09-04 — ignore a memory hit stamped for another week.
+    let dashData = (memHit && schedKeyOk(memHit.data, key)) ? memHit.data : null;
+    let revalidate = !dashData || (Date.now() - (memHit ? memHit.ts : 0) > SWR_MAX_AGE);
 
     if (!dashData) {
       const snap = readSchedSnapshot(key);
       if (snap) { dashData = snap; revalidate = true; }
     }
+
+    // v3.23 2026-09-04 — an empty week is never treated as fresh: if all we
+    // have says "nothing scheduled", always go and check.
+    if (dashData && !schedCount(dashData)) revalidate = true;
+    let bgRefresh = false;
 
     if (!dashData) {
       // Nothing at all for this week: show the real week with placeholder rows,
@@ -1607,17 +1668,21 @@
         api("dashSchedule", reqData, { cache: true, cacheKey: key }),
         loadTodosSafe().catch(() => {})
       ]);
+      stampSched(d, key);                       // v3.23 2026-09-04
       if (rv !== renderVersion) return;
       dashData = d;
       writeSchedSnapshot(key, d);
       revalidate = false;
+      bgRefresh = !schedCount(d);               // v3.23 2026-09-04
     } else if (revalidate) {
       const before = JSON.stringify(dashData) + "|" + JSON.stringify(todosCache);
+      bgRefresh = true;                           // v3.23 2026-09-04
       apiCache.delete(key);                       // force a real fetch, not the stale hit
       Promise.all([
         api("dashSchedule", reqData, { cache: true, cacheKey: key }),
         loadTodosSafe().catch(() => {})
       ]).then(([d]) => {
+        stampSched(d, key);                       // v3.23 2026-09-04
         writeSchedSnapshot(key, d);
         if (rv !== renderVersion) return;         // user moved on; the cache is still warmed
         // Only repaint if something actually changed, so a background refresh
@@ -1694,6 +1759,9 @@
             <button class="btn accent small" onclick="openNoteModal()">+ Add Event</button>
           </div>
         ` : ''}
+        ${(bgRefresh && !schedCount(dashData)) ? `
+          <div class="muted" style="margin-top:10px; font-size:12px; text-align:center">Checking for shifts…</div>
+        ` : ''}<!-- v3.23 2026-09-04 — an empty week says so while it re-checks -->
       </div>
     `;
 
@@ -1703,9 +1771,14 @@
     } else if (mode === 'week') {
       const days = [0,1,2,3,4,5,6].map(i => addDays(weekStart, i));
       const dayCards = [];
+      // v3.23 2026-09-04 — build the week from THIS payload. globalShifts is
+      // shared mutable state that renderOpen() and maybeShowOnShift() also
+      // write to, so reading it here made the week's contents depend on what
+      // else happened to finish loading.
+      const weekItems = schedData.shifts || [];
       for (const d of days) {
         const iso = isoDate(d);
-        const dayShifts = globalShifts.filter(s => isoDate(new Date(s.startISO)) === iso);
+        const dayShifts = weekItems.filter(s => isoDate(new Date(s.startISO)) === iso);
         const daySwaps = activeSwaps.filter(s => swapIsoDate(s) === iso);
         const dateLabel = d.toLocaleDateString(undefined, {weekday:'long', month:'short', day:'numeric'});
 
@@ -1934,11 +2007,13 @@
         const tOpen = agenda.attached.filter(t => !t.done).length + agenda.assigned.length;
         const timeStr = fmtShiftTime(s);
         const bits = [timeStr, s.task, s.location].filter(Boolean).join(" · ");
-        const marks = `${swapEids.has(String(s.eventId)) ? ' ⇄' : ''}${tOpen ? ` ☐${tOpen}` : ''}${g.continues ? ' ↷' : ''}${g.continued ? ' ↶' : ''}`;
+        // v3.24 2026-09-05 — a note now marks its block for everyone, and the
+        // full text rides along in the hover title.
+        const marks = `${swapEids.has(String(s.eventId)) ? ' ⇄' : ''}${tOpen ? ` ☐${tOpen}` : ''}${s.notes ? ' 📝' : ''}${g.continues ? ' ↷' : ''}${g.continued ? ' ↶' : ''}`;
         return `<div class="sgrid-blk ${s.isOpen?'open':''} ${g.openEnded?'openended':''} ${canEdit?'js-edit-shift':''}"
           data-eid="${esc(s.eventId)}"
           style="top:${top}px; height:${height}px; left:${(g.col*w).toFixed(2)}%; width:calc(${w.toFixed(2)}% - 3px); background:${gridTaskColor(s.task)}"
-          title="${who} — ${esc(bits)}${s.isOpen?' (open shift)':''}${g.openEnded?' (until needed)':''}">
+          title="${who} — ${esc(bits)}${s.isOpen?' (open shift)':''}${g.openEnded?' (until needed)':''}${s.notes?'\n📝 '+esc(s.notes):''}">
           <div class="b-who">${who}${marks}</div>
           <div class="b-sub">${esc(bits)}</div>
         </div>`;
@@ -2480,6 +2555,8 @@
           <div class="shift-main">${esc(s.task || "")} ${s.isOpen ? '<span class="badge open">OPEN</span>' : ''}</div>
           <div class="shift-sub">${esc(time)} • ${s.isOpen ? 'Available' : esc(name)}</div>
           ${s.location ? `<div class="shift-sub" style="font-style:italic">${esc(s.location)}</div>` : ''}
+          ${/* v3.24 2026-09-05 — everyone sees the shift note */ ''}
+          ${s.notes ? `<div class="shift-note">📝 ${esc(s.notes)}</div>` : ''}
         </div>
         <div class="row" style="gap:4px">
           ${taskBadge}
@@ -3505,8 +3582,18 @@
 
   function logout() { localStorage.removeItem("SCHED_SESSION"); clearInitCache(); try { localStorage.removeItem(VIEW_STATE_KEY); } catch(_) {} location.reload(); } // v3.15 2026-08-02, v3.22 2026-09-03
 
+  // v3.23 2026-09-04 — renderNav() runs twice on a cached open (once for the
+  // instant paint, once after initLoad). Re-adding the listener each time made
+  // every tab tap fire two renders.
+  let navBound = false;
   function renderNav() {
     document.getElementById("navTabs").style.display = "flex";
+    if (navBound) {
+      if (bootstrap.me.isManager) document.getElementById("tabAdmin").style.display = "block";
+      document.getElementById("whoBadge").textContent = (bootstrap.me.name || "").split(" ")[0];
+      return;
+    }
+    navBound = true;
     document.getElementById("navTabs").addEventListener("click", e => {
       const t = e.target.closest(".tab");
       if(t && t.dataset.tab !== activeTab) {

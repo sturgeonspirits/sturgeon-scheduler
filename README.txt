@@ -315,3 +315,18 @@ reused. Five changes in index.html:
     "Today" still jumps back to the current week; logging out clears it.
 Init cache is now SCHED_INIT_V2 (bootstrap + tasks, no longer tied to one week),
 so the nav and brand are up instantly even on a week you've never opened here.
+
+v3.24 2026-09-05 — Shift notes are visible to everyone (frontend + backend v7.1):
+The Notes box on a shift used to be stripped out for anyone who wasn't a
+manager (_cleanShift_ sent notes:"" to staff), so a note written for the
+person working the shift never reached them in the app. Notes now go out with
+every shift and appear:
+ - on the shift card, as a highlighted 📝 line under the time/name/location,
+ - on the Staffing Grid, as a 📝 mark on the block with the full text in the
+   hover tooltip,
+ - in the personal ICS calendar feed (it was always in the Google Calendar
+   event description — the app was the only place it was hidden).
+Editing is unchanged: managers are still the only ones who can write a note.
+The form label now reads "Notes (visible to everyone)" so that's obvious while
+typing. Redeploy the Apps Script web app after pasting the updated code.gs —
+the staff-facing change only takes effect once the backend is redeployed.

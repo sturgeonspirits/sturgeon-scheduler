@@ -1,5 +1,11 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v7.1 — Shift notes go to everyone. _cleanShift_ sent notes:"" to anyone
+ *        who wasn't a manager, so a note written for the person working
+ *        the shift never reached them in the app — even though it was
+ *        already in the Google Calendar event description they see.
+ *        Notes now ship with every shift (cards, Staffing Grid, ICS feed).
+ *        Writing a note is still manager-only (2026-09-05)
  * v7.0 — Off-site work hours (TimeLog). Staff flagged canLogHours can log
  *        work done away from the building, where there's no Toast punch.
  *        Entries store exact minutes; the Mon–Sun week total is rounded
@@ -2602,8 +2608,12 @@ function sendTimeLogManagerReminder(now) {
   });
 }
 
+// v7.1 2026-09-05 — Shift notes are visible to everyone, not just managers.
+// The notes field was already written to the Google Calendar event description
+// that staff see, so hiding it in the app only meant the note never reached the
+// person working the shift. Managers are still the only ones who can EDIT it.
 function _cleanShift_(r, isManager) {
-  return { eventId: r.eventId, task: r.task, location: r.location, startISO: r.startISO, endISO: r.endISO, staffEmail: r.staffEmail, staffName: r.staffName, notes: isManager ? (r.notes || "") : "", isOpen: _asBool_(r.isOpen), isOpenEnded: _asBool_(r.isOpenEnded), isSeries: _asBool_(r.isSeries), openShiftId: r.eventId };
+  return { eventId: r.eventId, task: r.task, location: r.location, startISO: r.startISO, endISO: r.endISO, staffEmail: r.staffEmail, staffName: r.staffName, notes: (r.notes || ""), isOpen: _asBool_(r.isOpen), isOpenEnded: _asBool_(r.isOpenEnded), isSeries: _asBool_(r.isSeries), openShiftId: r.eventId };
 }
 
 function _json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
