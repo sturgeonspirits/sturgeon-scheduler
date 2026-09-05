@@ -1,5 +1,14 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v7.4 — Events card separates EVENT time from STAFFING time. Staff come
+ *        early and stay to clean up, so the event window is the wrong
+ *        thing to schedule against. Each event now carries the actual
+ *        covering shift window when one exists, and a padded suggested
+ *        window (EVENT_SHIFT_PAD) when one doesn't (2026-09-05)
+ * v7.3 — Swap requests count against event staffing. A named person who
+ *        has asked to give the shift away is not staffing the event:
+ *        only APPROVED reassigns the shift, so REQUESTED and ACCEPTED
+ *        both leave the name unsettled. Fourth state "atrisk" (2026-09-05)
  * v7.2 — Event staffing check. Toast Catering & Events syncs into the
  *        staff account's calendar, but Toast has no idea who works an
  *        event — the covering shift only exists in this app. New
@@ -69,6 +78,14 @@ const LOCATIONS = ["Distillery", "Tasting Room", "Ready Room", "On the Lake", "O
 // PRIMARY calendar (Toast authorizes an account, it can't target a calendar).
 // Read-only here. Must be shared with the account this script runs as.
 const EVENTS_CALENDAR_ID = "sturgeonspiritsstaff@gmail.com";
+
+// v7.4 2026-09-05 — how far a shift runs either side of the event it covers.
+// Fitted against the four Sept 2026 events Karl actually staffed by hand:
+//   fundraiser +30/+30, rehearsal +60/+0, UWO +30/+60, shower +30/+0.
+// Before is reliably 30 (3 of 4). After is genuinely mixed, so 30 is the
+// middle rather than a rule — it's a starting point for the form, not a
+// decision. Tune here if the padding keeps needing the same correction.
+const EVENT_SHIFT_PAD = { beforeMin: 30, afterMin: 30 };
 
 const TZ_CENTRAL = "America/Chicago";
 
@@ -2952,6 +2969,16 @@ function _eventsWithStaffing_(start, end, isManager) {
 
   const shifts = _getShiftsCached_().filter(r => r.startISO);
 
+  // v7.3 2026-09-05 — a shift whose owner is trying to hand it off is not
+  // settled staffing. REQUESTED = nobody has taken it; ACCEPTED = someone
+  // has, but a manager still has to approve. Only APPROVED rewrites the
+  // shift row, and by then the normal named-staff check already sees it.
+  const openSwaps = {};
+  _readAll_(SHEET_SWAP).forEach(r => {
+    const st = String(r.status || "").toUpperCase();
+    if (st === "REQUESTED" || st === "ACCEPTED") openSwaps[String(r.eventId)] = r;
+  });
+
   const events = cal.getEvents(start, end).map(e => {
     const s = e.getStartTime(), en = e.getEndTime();
     const meta = _parseToastEvent_(e.getDescription());
@@ -2970,6 +2997,36 @@ function _eventsWithStaffing_(start, end, isManager) {
     const named = overlapping.filter(r => !_asBool_(r.isOpen) && r.staffName);
     const open  = overlapping.filter(r =>  _asBool_(r.isOpen));
 
+    // v7.3 2026-09-05 — split the named cover into settled vs pending-swap.
+    // The event is only "staffed" if at least one named person is not
+    // actively trying to get off it.
+    const shaky  = named.filter(r =>  openSwaps[String(r.eventId)]);
+    const solid  = named.filter(r => !openSwaps[String(r.eventId)]);
+    const swapRisk = shaky.map(r => {
+      const sw = openSwaps[String(r.eventId)];
+      return {
+        name:   r.staffName,
+        task:   r.task,
+        status: String(sw.status || "").toUpperCase(),
+        toName: sw.toEmail === "__anyone__" ? "anyone" : (sw.toEmail || "")
+      };
+    });
+
+    // v7.4 2026-09-05 — what to actually schedule, as opposed to when the
+    // guests are there.
+    const sugStart = new Date(s.getTime() - EVENT_SHIFT_PAD.beforeMin * 60000);
+    const sugEnd   = new Date((en ? en.getTime() : s.getTime()) + EVENT_SHIFT_PAD.afterMin * 60000);
+
+    // When shifts already cover it, the real window is the span of those
+    // shifts — that is the staffing time worth showing.
+    let coverStart = null, coverEnd = null;
+    overlapping.forEach(r => {
+      const rs = new Date(r.startISO);
+      const re = new Date(r.endISO || r.startISO);
+      if (!coverStart || rs < coverStart) coverStart = rs;
+      if (!coverEnd   || re > coverEnd)   coverEnd   = re;
+    });
+
     const out = {
       calEventId: e.getId(),
       title:      e.getTitle(),
@@ -2984,8 +3041,17 @@ function _eventsWithStaffing_(start, end, isManager) {
       orderStatus:   meta.orderStatus,
       invoiceStatus: meta.invoiceStatus,
       notes:         meta.notes,
-      state: named.length ? "staffed" : (open.length ? "unclaimed" : "unstaffed"),
-      staffed: named.map(r => ({ name: r.staffName, task: r.task, location: r.location })),
+      state: solid.length ? "staffed"
+           : shaky.length ? "atrisk"
+           : open.length  ? "unclaimed"
+           :                "unstaffed",
+      swapRisk: swapRisk,
+      suggestedStartISO: sugStart.toISOString(),
+      suggestedEndISO:   sugEnd.toISOString(),
+      coverStartISO: coverStart ? coverStart.toISOString() : "",
+      coverEndISO:   coverEnd   ? coverEnd.toISOString()   : "",
+      staffed: named.map(r => ({ name: r.staffName, task: r.task, location: r.location,
+                                 startISO: r.startISO, endISO: r.endISO })),
       openShifts: open.map(r => ({ eventId: r.eventId, task: r.task, location: r.location,
                                    startISO: r.startISO, endISO: r.endISO }))
     };

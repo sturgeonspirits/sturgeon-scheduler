@@ -352,3 +352,24 @@ links and totals are manager-only and never sent to staff.
 The card loads after the schedule paints and never blocks it (v3.22/v3.23
 rules). Requires the events calendar to be shared with the account the Apps
 Script runs as. Redeploy the Apps Script web app after pasting code.gs.
+
+v3.26 2026-09-05 — Pending swaps count against event staffing (frontend +
+backend v7.3):
+A named person who has asked to give a shift away is not staffing the event.
+Only APPROVED reassigns the shift row; REQUESTED (nobody has taken it) and
+ACCEPTED (taken, awaiting manager approval) both leave the name unsettled, and
+until now either one still read as STAFFED on the events card.
+Fourth state SWAP PENDING: at least one named person covers the event but all
+of them have open swap requests. An event with any settled name on it still
+reads STAFFED. The row names who wants out and whether there's a taker yet.
+
+v3.27 2026-09-05 — Event time vs staffing time (frontend + backend v7.4):
+The card listed the event window (when guests are there), which is never what
+you schedule — staff come early and stay to clean up. Each row now shows both:
+"event 4:30 – 6:30 PM" and, beneath it, the staffing window. When shifts
+already cover the event that's their real span; when none do it's a suggested
+window padded by EVENT_SHIFT_PAD (30 min before, 30 min after), and "Create
+shift" prefills the padded times rather than the raw event times.
+The 30/30 default was fitted to the four September events staffed by hand:
+before was +30 on three of four; after ranged +0 to +60, so 30 is a midpoint,
+not a rule. One constant at the top of code.gs to change it.
