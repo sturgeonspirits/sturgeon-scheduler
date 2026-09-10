@@ -1,5 +1,19 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v7.6 — No space named means the main Tasting Room. House events on the
+ *        ops calendar almost never fill in a location, and the old
+ *        fallback — no space, so match on time alone — let a Ready Room
+ *        shift read as cover for a Tasting Room pizza night. Karl's rule:
+ *        if it doesn't say Ready Room, it's the tasting room. Applied to
+ *        both sides, events and shifts, so every match is now a real
+ *        space match (2026-09-10)
+ * v7.5 — House programming counts as an event. Toast only knows about
+ *        catering, so cribbage nights, pizza Fridays, trivia and game
+ *        days were invisible to the staffing check. The Zoho "Sturgeon
+ *        Operations" feed carries all of it, plus a mirror of every
+ *        Toast booking, and is now read alongside the Google calendar.
+ *        Managers also get an email when something has no one on it
+ *        (notifyUnstaffedEvents, daily trigger) (2026-09-10)
  * v7.4 — Events card separates EVENT time from STAFFING time. Staff come
  *        early and stay to clean up, so the event window is the wrong
  *        thing to schedule against. Each event now carries the actual
@@ -86,6 +100,38 @@ const EVENTS_CALENDAR_ID = "sturgeonspiritsstaff@gmail.com";
 // middle rather than a rule — it's a starting point for the form, not a
 // decision. Tune here if the padding keeps needing the same correction.
 const EVENT_SHIFT_PAD = { beforeMin: 30, afterMin: 30 };
+
+// v7.5 2026-09-10 — ZOHO "STURGEON OPERATIONS" FEED
+// Sturgeon Operations is the read-only clearing house: house programming
+// (Cribbage, Pizza Friday, Trivia, tastings, game days) AND a mirrored copy of
+// every Toast booking land on it. Toast has no idea house programming exists,
+// so until now a Cribbage night with nobody scheduled looked fine to this app.
+// The Sturgeon Operations private iCal feed. NOTE: this URL is a read token
+// for the entire operations calendar — anyone holding it can read every event.
+// It is wired in here so this file works the moment it is pasted. If this repo
+// is ever made public, run setZohoOpsFeed() to move it into Script Properties
+// and blank the constant; the property wins over the constant either way.
+const OPS_ICS_URL = "https://calendar.zoho.com/ical/zz0801123040be390292f9a0be5bee5e2fe56a4ad3d2115ce95e9ebce1ed09d3be69aa0553d96432e43517366e9d0c02a335a2d474/pvt_e56d453cedef447b8c1348903d9d6076";
+const OPS_ICS_PROP = "ZOHO_OPS_ICS_URL";
+// Zoho's own aggregation script only runs hourly, so a tighter cache buys
+// nothing but UrlFetch quota.
+const OPS_ICS_CACHE_SEC = 900;
+// Categories on the ops calendar that never need staffing.
+// "Harvest Host" = overnight RV guests parking in the lot.
+const OPS_SKIP_CATEGORIES = ["harvest host"];
+// v7.6 2026-09-10 — the house default. An event or a shift that names no space
+// is in the main tasting room; only the Ready Room (and the other LOCATIONS)
+// get called out by name. Applied to BOTH sides of the match, so an unmarked
+// shift covers an unmarked event and nothing else.
+const DEFAULT_SPACE = "Tasting Room";
+// The card looks 60 days out; nobody acts on a gap that far away, so the
+// manager email is deliberately shorter-sighted.
+const OPS_NOTIFY_DAYS = 21;
+// Title shape on the ops calendar: "Programming — Cribbage and Cocktails".
+const OPS_TITLE_PREFIXES = ["Programming", "Private", "Harvest Host"];
+// The aggregation script stamps every event it copies with this marker.
+const OPS_MARKER_RE = /\[\[SSOPS\|([^\]]*)\]\]/;
+
 
 const TZ_CENTRAL = "America/Chicago";
 
@@ -276,8 +322,12 @@ function installTriggers() {
   ScriptApp.newTrigger("sendShiftReminders").timeBased().everyHours(1).create();
   // v6.4 2026-07-18 — unfinished shift tasks roll to the person's next shift
   ScriptApp.newTrigger("rollUnfinishedShiftTasks").timeBased().everyHours(1).create();
+  // v7.5 2026-09-10 — email managers when an event on the ops calendar
+  // still has no one on it. Runs at 8am Central; sends only on a change
+  // or the Monday recap, so a quiet week is silent.
+  ScriptApp.newTrigger("notifyUnstaffedEvents").timeBased().atHour(8).everyDays(1).create();
   // v6.4.1 2026-07-19 — works from both the Sheet menu and the script editor
-  const msg = "Triggers installed (Hourly Reminders + Task Rollover).";
+  const msg = "Triggers installed (Hourly Reminders + Task Rollover + Daily Event Staffing Check).";
   try { SpreadsheetApp.getUi().alert(msg); } catch (_) { Logger.log(msg); }
 }
 
@@ -2958,14 +3008,89 @@ function _parseToastEvent_(desc) {
 }
 
 /**
- * Grade every Toast event in [start, end) against the Shifts sheet.
+ * Grade every event in [start, end) against the Shifts sheet.
+ *
+ * v7.5 2026-09-10 — two sources now, not one:
+ *   1. Toast, read live off the staff Google calendar. Fresh to the minute.
+ *   2. The Zoho "Sturgeon Operations" iCal feed, which carries house
+ *      programming (the whole reason for this change) plus a mirrored copy of
+ *      every Toast booking, up to an hour behind.
+ * The Toast copy wins on collision — same booking, fresher data — so the feed
+ * effectively contributes only what Toast can't know about.
+ *
  * state: "unstaffed" (no shift at that space/time)
  *        "unclaimed" (a shift exists but it's still OPEN)
- *        "staffed"   (a named person is on it)
+ *        "atrisk"    (a named person is on it but wants out)
+ *        "staffed"   (a settled named person is on it)
  */
 function _eventsWithStaffing_(start, end, isManager) {
+  const warnings = [];
+  const raw = [];
+
+  // --- Source 1: Toast, off the staff Google calendar -----------------------
   const cal = CalendarApp.getCalendarById(EVENTS_CALENDAR_ID);
-  if (!cal) return { ok: false, error: "Events calendar not readable by this script account.", events: [] };
+  if (cal) {
+    cal.getEvents(start, end).forEach(e => {
+      raw.push({
+        id:          e.getId(),
+        title:       e.getTitle(),
+        start:       e.getStartTime(),
+        end:         e.getEndTime(),
+        isAllDay:    e.isAllDayEvent(),
+        description: e.getDescription(),
+        location:    e.getLocation(),
+        source:      "toast",
+        category:    "",
+        tentative:   false
+      });
+    });
+  } else {
+    warnings.push("Toast events calendar not readable by this script account.");
+  }
+
+  // --- Source 2: Zoho Sturgeon Operations ----------------------------------
+  const ops = _fetchOpsEvents_();
+  if (!ops.length && !_opsIcsUrl_()) {
+    warnings.push("House programming feed not configured — run setZohoOpsFeed().");
+  }
+  ops.forEach(e => {
+    const s  = new Date(e.startISO);
+    const en = new Date(e.endISO || e.startISO);
+    if (isNaN(s)) return;
+    if (!(s < end && en > start)) return;
+    // All-day entries are markers, not staffable windows (Harvest Host stays,
+    // "closed" notes). They'd otherwise swallow every shift that day.
+    if (e.isAllDay) return;
+    const meta = _opsMeta_(e);
+    if (OPS_SKIP_CATEGORIES.indexOf(String(meta.category).toLowerCase()) >= 0) return;
+    raw.push({
+      id:          "ops:" + (e.uid || (meta.title + e.startISO)),
+      title:       meta.title,
+      start:       s,
+      end:         en,
+      isAllDay:    false,
+      description: meta.description,
+      location:    e.location,
+      source:      meta.src || "ops",
+      category:    meta.category,
+      tentative:   meta.tentative
+    });
+  });
+
+  // --- Dedupe. Toast # is the only identifier both copies share; the titles
+  // deliberately differ ("Bridal Shower" vs "Private — Bridal Shower"). First
+  // in wins, and source 1 was pushed first.
+  const seen = {};
+  const items = [];
+  raw.forEach(it => {
+    const evNo = (String(it.description || "").match(/^Event #(\S+)/m) || [])[1];
+    const key = evNo
+      ? "toast#" + evNo
+      : "t#" + String(it.title).toLowerCase().replace(/\s+/g, " ").trim() + "@" + it.start.getTime();
+    if (seen[key]) return;
+    seen[key] = true;
+    items.push(it);
+  });
 
   const shifts = _getShiftsCached_().filter(r => r.startISO);
 
@@ -2979,19 +3104,27 @@ function _eventsWithStaffing_(start, end, isManager) {
     if (st === "REQUESTED" || st === "ACCEPTED") openSwaps[String(r.eventId)] = r;
   });
 
-  const events = cal.getEvents(start, end).map(e => {
-    const s = e.getStartTime(), en = e.getEndTime();
-    const meta = _parseToastEvent_(e.getDescription());
+  const events = items.map(it => {
+    const s = it.start, en = it.end;
+    const meta = _parseToastEvent_(it.description);
 
     // A shift covers the event only if it overlaps in TIME and matches the
-    // event SPACE. With no space parsed we fall back to time alone and say so.
-    const spaceKnown = !!meta.space;
+    // event SPACE. Toast writes the space into the description; the ops feed
+    // usually leaves LOCATION empty.
+    // v7.6 2026-09-10 — an empty space is not an unknown, it's the tasting
+    // room. That reading is applied to the shift as well as the event, so an
+    // unmarked shift covers an unmarked event and a Ready Room shift no longer
+    // counts as cover for pizza night. There is no time-only fallback left.
+    const namedSpace = meta.space || _normSpace_(it.location);
+    const spaceAssumed = !namedSpace;
+    const space = namedSpace || DEFAULT_SPACE;
     const overlapping = shifts.filter(r => {
       const rs = new Date(r.startISO);
       const re = new Date(r.endISO || r.startISO);
       if (!(rs < en && re > s)) return false;
-      if (!spaceKnown) return true;
-      return String(r.location || "").trim().toLowerCase() === meta.space.toLowerCase();
+      const rl = String(r.location || "").trim().replace(/^the\s+/i, "");
+      const shiftSpace = rl || DEFAULT_SPACE;
+      return shiftSpace.toLowerCase() === space.toLowerCase();
     });
 
     const named = overlapping.filter(r => !_asBool_(r.isOpen) && r.staffName);
@@ -3028,19 +3161,30 @@ function _eventsWithStaffing_(start, end, isManager) {
     });
 
     const out = {
-      calEventId: e.getId(),
-      title:      e.getTitle(),
+      calEventId: it.id,
+      title:      it.title,
       startISO:   s.toISOString(),
       endISO:     en ? en.toISOString() : "",
-      isAllDay:   e.isAllDayEvent(),
-      space:      meta.space,
-      spaceKnown: spaceKnown,
+      isAllDay:   it.isAllDay,
+      space:      space,
+      spaceKnown: true,          // kept for older clients; always a real space now
+      // v7.6 2026-09-10 — true when the space came from the house rule rather
+      // than from the event itself. The card says "assumed" so a wrong guess
+      // is visible rather than silent.
+      spaceAssumed: spaceAssumed,
       guests:     meta.guests,
       occasion:   meta.occasion,
       eventNo:    meta.eventNo,
-      orderStatus:   meta.orderStatus,
+      // v7.5 2026-09-10 — where this row came from, so the card can say
+      // "house programming" instead of implying Toast knows about cribbage.
+      source:      it.source,
+      sourceLabel: _eventSourceLabel_(it.source),
+      category:    it.category,
+      // Programming carries "(TENTATIVE)" in the title where Toast uses a
+      // field. Feed it into the same pill rather than inventing a second one.
+      orderStatus:   meta.orderStatus || (it.tentative ? "Tentative" : ""),
       invoiceStatus: meta.invoiceStatus,
-      notes:         meta.notes,
+      notes:         meta.notes || (it.source === "toast" ? "" : String(it.description || "").trim()),
       state: solid.length ? "staffed"
            : shaky.length ? "atrisk"
            : open.length  ? "unclaimed"
@@ -3069,7 +3213,28 @@ function _eventsWithStaffing_(start, end, isManager) {
   });
 
   events.sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
-  return { ok: true, events: events };
+  return { ok: true, events: events, warnings: warnings };
+}
+
+// v7.5 2026-09-10 — plain-English source, for the card and the digest email.
+function _eventSourceLabel_(src) {
+  switch (String(src || "").toLowerCase()) {
+    case "toast":       return "Toast booking";
+    case "programming": return "House programming";
+    case "private":     return "Private booking";
+    default:            return "Ops calendar";
+  }
+}
+
+// v7.5 2026-09-10 — a free-text location is only useful if it matches a real
+// space; "" means "we don't know", which downgrades matching to time alone.
+function _normSpace_(raw) {
+  const v = String(raw || "").trim().replace(/^the\s+/i, "");
+  if (!v) return "";
+  for (let i = 0; i < LOCATIONS.length; i++) {
+    if (LOCATIONS[i].toLowerCase() === v.toLowerCase()) return LOCATIONS[i];
+  }
+  return "";
 }
 
 /** Manager-only: upcoming Toast events and whether they still need staffing. */
@@ -3082,4 +3247,332 @@ function api_listEvents(data) {
   const end   = data.endISO ? new Date(data.endISO) : new Date(start.getTime() + days * 86400000);
 
   return _eventsWithStaffing_(start, end, true);
+}
+
+/**********************************************
+ * v7.5 2026-09-10 — ZOHO OPS FEED + MISSING-SHIFT NOTIFICATIONS
+ *
+ * Sturgeon Operations (Zoho) is the calendar everything lands on: house
+ * programming created on "Programming", plus every Toast booking pulled
+ * through Google. Nothing is ever written to it — read it, don't write it.
+ *
+ * Read here as iCal over UrlFetch rather than by subscribing Google to the
+ * feed: Google refreshes subscribed ICS calendars on its own schedule (hours,
+ * sometimes a day), which is useless for "you have a cribbage night on Thursday
+ * and nobody is on the bar".
+ **********************************************/
+
+/** The feed URL. A Script Property overrides the constant, so the URL can be
+ *  moved out of this file later without touching any other code. */
+function _opsIcsUrl_() {
+  try {
+    const p = PropertiesService.getScriptProperties().getProperty(OPS_ICS_PROP);
+    if (p) return p;
+  } catch (_) {}
+  return OPS_ICS_URL || "";
+}
+
+/**
+ * ONE-TIME SETUP. Paste the Sturgeon Operations private iCal URL between the
+ * quotes, run this once from the Apps Script editor, then blank it out again.
+ * The URL is stored in Script Properties and survives every future paste of
+ * this file.
+ */
+function setZohoOpsFeed() {
+  const URL = OPS_ICS_URL;  // or paste a different feed URL here
+  if (!URL) { Logger.log("Nothing to save — paste a URL into setZohoOpsFeed() first."); return; }
+  PropertiesService.getScriptProperties().setProperty(OPS_ICS_PROP, URL.trim());
+  CacheService.getScriptCache().remove("opsIcs");
+  Logger.log("Saved. Now run testZohoOpsFeed() to check it.");
+}
+
+/** Diagnostic: what the feed actually contains right now. */
+function testZohoOpsFeed() {
+  if (!_opsIcsUrl_()) { Logger.log("No feed URL stored. Run setZohoOpsFeed() first."); return; }
+  CacheService.getScriptCache().remove("opsIcs");
+  const evs = _fetchOpsEvents_();
+  Logger.log("Parsed " + evs.length + " events from the ops feed.");
+  const now = Date.now();
+  evs.filter(e => new Date(e.startISO).getTime() > now)
+     .sort((a, b) => new Date(a.startISO) - new Date(b.startISO))
+     .slice(0, 15)
+     .forEach(e => {
+       const m = _opsMeta_(e);
+       Logger.log(Utilities.formatDate(new Date(e.startISO), TZ_CENTRAL, "EEE MMM d h:mm a")
+         + "  [" + (m.src || "?") + "/" + (m.category || "-") + "]  " + m.title
+         + (e.location ? "  @" + e.location : ""));
+     });
+}
+
+/** Fetch + parse the ops feed, cached. Never throws — a dead feed just means
+ *  no house programming this pass, and the card must never break the week. */
+function _fetchOpsEvents_() {
+  const cache = CacheService.getScriptCache();
+  const hit = _cacheGetLarge_(cache, "opsIcs");
+  if (hit) { try { return JSON.parse(hit); } catch (_) {} }
+
+  const url = _opsIcsUrl_();
+  if (!url) return [];
+
+  let text = "";
+  try {
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+    if (res.getResponseCode() !== 200) {
+      Logger.log("Ops feed returned HTTP " + res.getResponseCode());
+      return [];
+    }
+    text = res.getContentText();
+  } catch (e) {
+    Logger.log("Ops feed fetch failed: " + e);
+    return [];
+  }
+
+  // The feed carries a full year either way. Trim before caching — the raw
+  // file is ~78KB and the cache is chunked.
+  const lo = Date.now() - 14 * 86400000;
+  const hi = Date.now() + 200 * 86400000;
+  const events = _parseIcs_(text).filter(e => {
+    const t = new Date(e.startISO).getTime();
+    return !isNaN(t) && t >= lo && t <= hi;
+  });
+
+  _cachePutLarge_(cache, "opsIcs", JSON.stringify(events), OPS_ICS_CACHE_SEC);
+  return events;
+}
+
+/**
+ * Minimal RFC 5545 reader — enough for this feed and nothing more.
+ * Zoho expands recurrence server-side (50 separate Cribbage VEVENTs, no
+ * RRULE), so there is deliberately no recurrence engine here. If Zoho ever
+ * starts emitting RRULE, recurring events will show once and stop — that's
+ * the failure to look for.
+ */
+function _parseIcs_(text) {
+  // Unfold continuation lines first: a folded line is CRLF + one space/tab.
+  const unfolded = String(text || "").replace(/\r\n/g, "\n").replace(/\n[ \t]/g, "");
+  const blocks = unfolded.split("BEGIN:VEVENT").slice(1);
+  const out = [];
+
+  blocks.forEach(b => {
+    const body = b.split("END:VEVENT")[0];
+    const ev = { uid: "", summary: "", description: "", location: "",
+                 status: "", isAllDay: false, startISO: "", endISO: "" };
+
+    body.split("\n").forEach(line => {
+      const c = line.indexOf(":");
+      if (c < 0) return;
+      const head = line.slice(0, c);
+      const val  = line.slice(c + 1);
+      const name = head.split(";")[0].toUpperCase();
+      const params = head.slice(name.length);
+      switch (name) {
+        case "UID":         ev.uid = val.trim(); break;
+        case "SUMMARY":     ev.summary = _icsUnescape_(val); break;
+        case "DESCRIPTION": ev.description = _icsUnescape_(val); break;
+        case "LOCATION":    ev.location = _icsUnescape_(val); break;
+        case "STATUS":      ev.status = val.trim(); break;
+        case "DTSTART":
+          if (/VALUE=DATE(?![-A-Z])/i.test(params)) ev.isAllDay = true;
+          ev.startISO = _icsToIso_(val);
+          break;
+        case "DTEND":       ev.endISO = _icsToIso_(val); break;
+      }
+    });
+
+    if (ev.startISO) out.push(ev);
+  });
+
+  return out;
+}
+
+/** \n \, \; \\ — one pass, so an escaped backslash isn't re-read. */
+function _icsUnescape_(s) {
+  return String(s || "")
+    .replace(/\\([\\;,nN])/g, (m, ch) => (ch === "n" || ch === "N") ? "\n" : ch)
+    .trim();
+}
+
+/** ICS date/time -> ISO. Zoho sends UTC ("...Z"); DATE and floating values are
+ *  handled as Central, which is what a wall-clock time on this calendar means. */
+function _icsToIso_(val) {
+  const v = String(val || "").trim();
+  const m = v.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z)?)?$/);
+  if (!m) { const d = new Date(v); return isNaN(d) ? "" : d.toISOString(); }
+  const y = +m[1], mo = +m[2], d = +m[3];
+  const hh = m[4] ? +m[4] : 0, mi = m[5] ? +m[5] : 0, ss = m[6] ? +m[6] : 0;
+  if (m[7]) return new Date(Date.UTC(y, mo - 1, d, hh, mi, ss)).toISOString();
+  return _centralWallToDate_(y, mo, d, hh, mi, ss).toISOString();
+}
+
+/** Wall-clock Central -> real instant, without assuming the script's timezone
+ *  and without hard-coding a DST rule. Two passes settle the offset. */
+function _centralWallToDate_(y, mo, d, hh, mi, ss) {
+  const base = Date.UTC(y, mo - 1, d, hh, mi, ss);
+  let guess = new Date(base);
+  for (let i = 0; i < 2; i++) {
+    const off = Utilities.formatDate(guess, TZ_CENTRAL, "Z"); // e.g. -0500
+    const sign = off.charAt(0) === "-" ? -1 : 1;
+    const mins = sign * (parseInt(off.substr(1, 2), 10) * 60 + parseInt(off.substr(3, 2), 10));
+    guess = new Date(base - mins * 60000);
+  }
+  return guess;
+}
+
+/**
+ * Pull the ops calendar's own conventions out of an event:
+ *   SUMMARY  "Programming — Cribbage and Cocktails"   (the prefix is sometimes
+ *            doubled by the aggregation script — strip it as often as it appears)
+ *   marker   "[[SSOPS|src=toast|key=...|hash=...]]" at the end of DESCRIPTION
+ */
+function _opsMeta_(ev) {
+  const desc = String(ev.description || "");
+  let src = "";
+  const m = desc.match(OPS_MARKER_RE);
+  if (m) {
+    const sm = m[1].match(/src=([a-z0-9_-]+)/i);
+    if (sm) src = sm[1].toLowerCase();
+  }
+
+  let title = String(ev.summary || "").trim();
+  let category = "";
+  for (let i = 0; i < 4; i++) {
+    const pm = title.match(/^([A-Za-z ]+?)\s*[—–-]\s*(.+)$/);
+    if (!pm || OPS_TITLE_PREFIXES.indexOf(pm[1].trim()) < 0) break;
+    if (!category) category = pm[1].trim();
+    title = pm[2].trim();
+  }
+
+  const tentative = /\(\s*tentative\s*\)/i.test(title);
+  title = title.replace(/\(\s*tentative\s*\)/ig, "").trim();
+
+  if (!src && category) src = category.toLowerCase() === "programming" ? "programming" : "private";
+
+  return {
+    src: src,
+    category: category,
+    title: title || String(ev.summary || "").trim(),
+    tentative: tentative,
+    description: desc.replace(OPS_MARKER_RE, "").trim()
+  };
+}
+
+/**********************************************
+ * v7.5 2026-09-10 — MANAGER DIGEST: EVENTS WITH NO SHIFTS
+ *
+ * The card only helps a manager who opens the app. This is the push half:
+ * one email when something on the calendar has no one on it.
+ *
+ * Deliberately not chatty. It sends when the picture CHANGES (a new event
+ * appears, or one slips out of "staffed"), and once more each Monday as a
+ * standing reminder of what is still open. A quiet week sends nothing.
+ **********************************************/
+function notifyUnstaffedEvents() {
+  const props = PropertiesService.getScriptProperties();
+  const start = new Date();
+  const end   = new Date(start.getTime() + OPS_NOTIFY_DAYS * 86400000);
+
+  let res;
+  try { res = _eventsWithStaffing_(start, end, true); }
+  catch (e) { Logger.log("notifyUnstaffedEvents failed: " + e); return; }
+  if (!res || !res.ok) return;
+
+  const needs = res.events.filter(e => e.state !== "staffed");
+  const today = Utilities.formatDate(new Date(), TZ_CENTRAL, "yyyy-MM-dd");
+
+  if (!needs.length) {
+    props.setProperty("OPS_NOTIFY_KEY", "");
+    return;
+  }
+
+  const key     = needs.map(e => e.calEventId + ":" + e.state).sort().join("|");
+  const lastKey = props.getProperty("OPS_NOTIFY_KEY") || "";
+  const lastDay = props.getProperty("OPS_NOTIFY_DAY") || "";
+  const isMonday = Utilities.formatDate(new Date(), TZ_CENTRAL, "EEE") === "Mon";
+
+  const changed = key !== lastKey;
+  if (!changed && !(isMonday && lastDay !== today)) return;
+
+  const to = _managerEmails_();
+  if (!to.length) return;
+
+  const subject = EMAIL_SETTINGS.managerNotifySubjectPrefix + " " + needs.length +
+                  (needs.length === 1 ? " event needs staff" : " events need staff");
+  const html = _unstaffedDigestHtml_(needs, changed);
+
+  to.forEach(addr => {
+    try {
+      MailApp.sendEmail({ to: addr, subject: subject, htmlBody: html,
+                          name: EMAIL_SETTINGS.fromName, replyTo: EMAIL_SETTINGS.replyTo });
+    } catch (e) { Logger.log("Digest send failed for " + addr + ": " + e); }
+  });
+
+  props.setProperty("OPS_NOTIFY_KEY", key);
+  props.setProperty("OPS_NOTIFY_DAY", today);
+}
+
+/** Managers from the Staff sheet, with the configured manager address as a
+ *  floor so this can never quietly email nobody. */
+function _managerEmails_() {
+  const out = {};
+  try {
+    _staffIndex_().forEach(s => { if (s.isManager && s.email) out[_normEmail_(s.email)] = true; });
+  } catch (_) {}
+  if (EMAIL_SETTINGS.managerEmail) out[_normEmail_(EMAIL_SETTINGS.managerEmail)] = true;
+  return Object.keys(out);
+}
+
+function _unstaffedDigestHtml_(needs, changed) {
+  const soonCut = Date.now() + 7 * 86400000;
+
+  const row = (e) => {
+    const s  = new Date(e.startISO);
+    const en = e.endISO ? new Date(e.endISO) : null;
+    const when = Utilities.formatDate(s, TZ_CENTRAL, "EEE MMM d") + " · " +
+                 Utilities.formatDate(s, TZ_CENTRAL, "h:mm a") +
+                 (en ? " – " + Utilities.formatDate(en, TZ_CENTRAL, "h:mm a") : "");
+    const label = e.state === "unstaffed" ? "NO SHIFTS"
+                : e.state === "atrisk"    ? "SWAP PENDING"
+                :                           "UNCLAIMED";
+    const colour = e.state === "unstaffed" ? "#96321F"
+                 : e.state === "atrisk"    ? "#8a6fb0"
+                 :                           "#e8a030";
+    const sug = e.suggestedStartISO
+      ? "suggested shift " + Utilities.formatDate(new Date(e.suggestedStartISO), TZ_CENTRAL, "h:mm a") +
+        " – " + Utilities.formatDate(new Date(e.suggestedEndISO), TZ_CENTRAL, "h:mm a")
+      : "";
+    const bits = [e.sourceLabel, e.space || (e.spaceKnown ? "" : "space not set"),
+                  e.guests ? e.guests + " guests" : "",
+                  /^tentative$/i.test(e.orderStatus || "") ? "tentative" : ""]
+                 .filter(Boolean).join(" · ");
+    const urgent = new Date(e.startISO).getTime() < soonCut;
+
+    return '<tr>' +
+      '<td style="padding:8px 10px;border-bottom:1px solid #eee;vertical-align:top">' +
+        '<div style="font-weight:700;font-size:14px">' + _esc_(e.title) + '</div>' +
+        '<div style="font-size:12px;color:#666">' + _esc_(when) + (urgent ? ' <b style="color:#96321F">— this week</b>' : '') + '</div>' +
+        '<div style="font-size:12px;color:#666">' + _esc_(bits) + '</div>' +
+        (sug ? '<div style="font-size:12px;color:#222;font-weight:700">' + _esc_(sug) + '</div>' : '') +
+      '</td>' +
+      '<td style="padding:8px 10px;border-bottom:1px solid #eee;text-align:right;vertical-align:top;white-space:nowrap">' +
+        '<span style="background:' + colour + ';color:#fff;font-size:10px;font-weight:800;padding:3px 7px;border-radius:4px;letter-spacing:.5px">' + label + '</span>' +
+      '</td></tr>';
+  };
+
+  const lead = changed
+    ? "Something on the calendar has no one on it."
+    : "Still open from last week.";
+
+  return '<div style="font-family:Helvetica,Arial,sans-serif;max-width:620px">' +
+    '<h2 style="font-size:17px;margin:0 0 4px">Events needing staff</h2>' +
+    '<div style="font-size:13px;color:#666;margin-bottom:12px">' + lead +
+      ' Next ' + OPS_NOTIFY_DAYS + ' days · Toast bookings and house programming.</div>' +
+    '<table style="border-collapse:collapse;width:100%">' + needs.map(row).join("") + '</table>' +
+    '<p style="font-size:13px;margin-top:16px"><a href="' + SITE_URL + '" style="color:#96321F;font-weight:700">Open the scheduler</a></p>' +
+    '<p style="font-size:11px;color:#999">Sent when the picture changes, plus a Monday recap. Nothing to do means no email.</p>' +
+  '</div>';
+}
+
+function _esc_(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

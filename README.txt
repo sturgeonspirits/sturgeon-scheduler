@@ -373,3 +373,60 @@ shift" prefills the padded times rather than the raw event times.
 The 30/30 default was fitted to the four September events staffed by hand:
 before was +30 on three of four; after ranged +0 to +60, so 30 is a midpoint,
 not a rule. One constant at the top of code.gs to change it.
+
+v3.28 2026-09-10 — House programming counts as an event, and managers get told
+(frontend + backend v7.5):
+The staffing check only ever saw Toast, and Toast only knows about catering.
+Cribbage nights, pizza Fridays, trivia, game days, tastings and classes were
+invisible to it — an empty Thursday looked exactly like a staffed one.
+The Zoho "Sturgeon Operations" calendar is the clearing house for all of it:
+house programming created on "Programming", plus a mirrored copy of every
+Toast booking pulled through Google. It is now read as an iCal feed over
+UrlFetch (not by subscribing Google to it — Google refreshes subscribed ICS
+calendars on its own schedule, hours to a day, which is useless for "there's
+cribbage on Thursday and nobody is on the bar"). Cached 15 minutes; Zoho's own
+aggregation only runs hourly, so newly created Programming events take up to an
+hour to appear.
+Both calendars feed one list. The Toast copy wins on collision — same booking,
+fresher data — matched on Toast's "Event #", because the titles deliberately
+differ ("Bridal Shower" vs "Private — Bridal Shower"). Harvest Host entries and
+all-day markers are skipped; they aren't staffable windows.
+House events rarely carry a space, so they fall back to time-only matching and
+the row says so ("no space set · matched on time alone") rather than implying a
+space check happened. Every row now carries a source badge: Toast booking,
+House programming, Private booking.
+New: notifyUnstaffedEvents(), a daily 8am Central trigger that emails every
+manager in the Staff sheet when something in the next 21 days has no one on it.
+Deliberately not chatty — it sends when the picture CHANGES (a new event
+appears, or one slips out of staffed) and once more each Monday as a standing
+reminder. A quiet week sends nothing. OPS_NOTIFY_DAYS at the top of code.gs.
+
+SETUP (one time, in the Apps Script editor, after pasting code.gs):
+ 1. Run testZohoOpsFeed() and check the log: it prints how many events parsed
+    and the next 15, with source and category. Nothing to configure first —
+    the feed URL is the OPS_ICS_URL constant at the top of the file.
+ 2. Re-run installTriggers() — it rebuilds all triggers, and the new daily
+    event-staffing check is only added there.
+ 3. Redeploy the Apps Script web app.
+Note on that URL: it is a read token for the entire operations calendar. If
+this repo is ever made public, run setZohoOpsFeed() to move it into Script
+Properties (property ZOHO_OPS_ICS_URL) and blank the constant — the property
+wins over the constant, so nothing else has to change.
+Failure mode to watch for: Zoho expands recurrence server-side today (50
+separate Cribbage events, no RRULE), so there is no recurrence engine here. If
+Zoho ever starts emitting RRULE, recurring events will appear once and stop.
+
+v3.29 2026-09-10 — No space named means the main tasting room (frontend +
+backend v7.6):
+v3.28 shipped with a soft spot: house events on the ops calendar almost never
+fill in a location, and with no space the check fell back to matching on time
+alone. That let a Ready Room shift read as cover for a Tasting Room pizza
+night — and if a name was on that Ready Room shift, pizza night showed STAFFED
+with nobody on the oven or the bar.
+The house rule settles it: if an event doesn't say Ready Room (or another named
+space), it's the main tasting room. DEFAULT_SPACE at the top of code.gs.
+Applied to BOTH sides of the match — a shift with no location set is also read
+as the tasting room — so an unmarked shift covers an unmarked event and nothing
+else. The time-only fallback is gone; every match is now a real space match.
+Rows whose space came from the house rule rather than from the event itself are
+labelled "(assumed)", so a wrong guess is visible rather than silent.
