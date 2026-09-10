@@ -1,5 +1,10 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v7.7 — Menu functions never open a modal. getUi().alert() puts a dialog
+ *        in the bound spreadsheet; run from the script editor there is
+ *        nothing to dismiss it, so installTriggers() looked like it hung
+ *        forever when the work was already done. toast() instead — it
+ *        never blocks, and the log always carries the message (2026-09-10)
  * v7.6 — No space named means the main Tasting Room. House events on the
  *        ops calendar almost never fill in a location, and the old
  *        fallback — no space, so match on time alone — let a Ready Room
@@ -308,6 +313,15 @@ function printAllIcsUrls() {
 // 2. SETUP & TRIGGERS
 // ============================================================================
 
+// v7.7 2026-09-10 — say something without blocking. alert() is a modal in the
+// spreadsheet: harmless from the Scheduler menu, but from the script editor it
+// waits on a click nobody is there to make and the execution spins until it
+// times out. The work is already done by then, which is the confusing part.
+function _notify_(msg) {
+  Logger.log(msg);
+  try { SpreadsheetApp.getActiveSpreadsheet().toast(msg, "Scheduler", 6); } catch (_) {}
+}
+
 function onOpen() {
   SpreadsheetApp.getUi().createMenu("Scheduler")
     .addItem("Install Triggers", "installTriggers")
@@ -326,9 +340,9 @@ function installTriggers() {
   // still has no one on it. Runs at 8am Central; sends only on a change
   // or the Monday recap, so a quiet week is silent.
   ScriptApp.newTrigger("notifyUnstaffedEvents").timeBased().atHour(8).everyDays(1).create();
-  // v6.4.1 2026-07-19 — works from both the Sheet menu and the script editor
-  const msg = "Triggers installed (Hourly Reminders + Task Rollover + Daily Event Staffing Check).";
-  try { SpreadsheetApp.getUi().alert(msg); } catch (_) { Logger.log(msg); }
+  // v7.7 2026-09-10 — non-blocking, so this works identically from the Sheet
+  // menu and from the script editor. Never alert() here.
+  _notify_("Triggers installed (Hourly Reminders + Task Rollover + Daily Event Staffing Check).");
 }
 
 function setupSheets() {
@@ -350,7 +364,7 @@ function setupSheets() {
   // the quarter hour happens on the week total at read time, never here.
   _ensureSheet_(ss, SHEET_TIMELOG, ["id", "staffEmail", "staffName", "workDate", "weekStart", "startTime", "endTime", "minutes", "category", "description", "status", "submittedAtISO", "updatedAtISO", "approvedBy", "approvedAtISO", "toastEnteredBy", "toastEnteredAtISO"]);
   _invalidateAllCaches_();
-  SpreadsheetApp.getUi().alert("Sheets initialized (with Central Time + Task columns).");
+  _notify_("Sheets initialized (with Central Time + Task columns).");  // v7.7 2026-09-10
 }
 
 /**
@@ -402,7 +416,7 @@ function backfillCentralTime() {
     }
   }
 
-  SpreadsheetApp.getUi().alert("Backfill complete: " + totalFilled + " cells filled with Central Time values.");
+  _notify_("Backfill complete: " + totalFilled + " cells filled with Central Time values.");  // v7.7 2026-09-10
 }
 
 // ============================================================================

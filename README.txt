@@ -430,3 +430,13 @@ as the tasting room — so an unmarked shift covers an unmarked event and nothin
 else. The time-only fallback is gone; every match is now a real space match.
 Rows whose space came from the house rule rather than from the event itself are
 labelled "(assumed)", so a wrong guess is visible rather than silent.
+
+v7.7 2026-09-10 — Menu functions never open a modal (backend only):
+installTriggers() ended with SpreadsheetApp.getUi().alert(). From the Scheduler
+menu that's a harmless dialog; run from the script editor it opens a modal in
+the bound spreadsheet with nobody there to click it, so the execution spins
+until it times out — after the triggers have already been created. Same trap in
+setupSheets() and backfillCentralTime().
+All three now use _notify_(): Logger.log always, plus a non-blocking toast() in
+the spreadsheet if anyone has it open. The only getUi() left is the menu builder
+in onOpen(), which has a real UI context by definition.
