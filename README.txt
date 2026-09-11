@@ -440,3 +440,56 @@ setupSheets() and backfillCentralTime().
 All three now use _notify_(): Logger.log always, plus a non-blocking toast() in
 the spreadsheet if anyone has it open. The only getUi() left is the menu builder
 in onOpen(), which has a real UI context by definition.
+
+v3.30 2026-09-11 — Rows name the shifts they are NOT counting (frontend +
+backend v7.8):
+Found the hard way: Pizza Friday showed "needs shifts", and creating the
+suggested shift was then rejected — Amanda Benner was already working. Both
+checks were right and they contradicted each other, because they use different
+rules. The staffing check matches on SPACE + time (v7.6); the conflict check on
+save matches on PERSON + time only, with no notion of space. Her pizza shift was
+coded Distillery while pizza actually runs in the tasting room, so it was
+correctly not counted as cover and correctly counted as a conflict.
+Each event now carries `elsewhere`: up to 6 shifts that overlap the event in
+time but sit in another space. They are still NOT cover — that is the whole
+point of v7.6 — but the row now says "Also working then: Amanda Benner — Food
+Prep, Distillery — different space, not counted as cover", so the situation is
+visible before you click Create rather than after.
+The underlying data rule stands: code a shift for the space the work happens in,
+not the space the equipment lives in. Pizza prep for a tasting room pizza night
+is a Tasting Room shift.
+
+v7.9 2026-09-11 — Nothing can block deleting a shift (backend only):
+A Food Prep shift (Amanda Benner, Sat Sep 26) refused to delete: the app threw
+an error and the shift was still there after a refresh. api_deleteShift removed
+the CALENDAR EVENT first and the sheet row second, so any calendar failure threw
+before the row was touched — event already gone, an id belonging to another
+calendar, a recurring instance, a permissions hiccup, all the same outcome: an
+undeletable shift with no way to clear it from the app.
+Reversed. The sheet row is what the app renders, so the row goes first and the
+calendar work is best-effort around it:
+ - a stale shift cache no longer produces "Shift not found" — it re-reads the
+   real rows before giving up;
+ - deleteEvent() failing on a recurring instance falls back to the series;
+ - any remaining calendar failure comes back as calWarning on the response and
+   is logged, instead of aborting the delete;
+ - the cancellation email is wrapped too — a mail failure is not a failed delete.
+Leftover calendar events are possible in that failure path (the shift is gone
+from the app but the event survives on the Scheduling calendar). Check the
+calendar if the response carries a calWarning.
+
+v7.10 2026-09-11 — Cleanup utilities, and a reusable delete (backend only):
+The delete logic is split out of api_deleteShift into _deleteShiftById_(eventId,
+byName, notify), so anything run from the script editor takes exactly the same
+path as the app — sheet row, calendar event, pending swaps, shift tasks. Editing
+the sheet by hand does none of that and leaves orphans behind; use these instead.
+New: findAmandaSaturdayShifts() prints what would go and changes nothing;
+deleteAmandaSaturdayShifts() removes them. Amanda works pizza nights, never
+Saturdays, so a Saturday shift in her name is an entry error.
+Past shifts are records — they are what a payroll question gets checked against
+— so neither function touches anything before today. Both report how many they
+skipped; flip INCLUDE_PAST inside them if the old rows are wrong too.
+Deletions here pass notify=false: an entry error was never a real shift, so no
+"Shift Canceled" email goes to the person for it.
+Both use function-local constants, never top-level ones — Apps Script shares one
+global scope across every file in the project.

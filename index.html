@@ -2528,6 +2528,10 @@
   }
 
   /**********************************************
+   * v3.30 2026-09-11 — rows name the shifts they are NOT counting: someone
+   * working that hour in another space. Stops "needs shifts" from walking you
+   * into "that person is already working".
+   *
    * v3.29 2026-09-10 — no space named means the main tasting room, on the
    * event and on the shift alike, so every match is a real space match.
    *
@@ -2606,6 +2610,14 @@
                   : e.state === "atrisk"    ? "swap pending"
                   :                           "unclaimed";
       const openTxt = (e.openShifts || []).map(o => `${o.task} — OPEN`).join(", ");
+
+      // v3.30 2026-09-11 — somebody may already be working at that hour in a
+      // different space. Not cover, but you need to see it before you create a
+      // shift the conflict check is going to reject.
+      const els = e.elsewhere || [];
+      const elseTxt = els.slice(0, 3)
+        .map(o => `${o.name || 'OPEN'} — ${o.task}${o.location ? ', ' + o.location : ''}`)
+        .join('; ') + (els.length > 3 ? ` +${els.length - 3} more` : '');
       const swapTxt = (e.swapRisk || []).map(w =>
         `${w.name} (${w.task}) wants out — ${w.status === "ACCEPTED" ? "taken, needs your approval" : "no taker yet"}`
       ).join("; ");
@@ -2628,6 +2640,7 @@
               ${staffWhen ? `<div class="ev-meta" style="font-weight:700; color:var(--text)">${esc(staffWhen)}</div>` : ''}
               <div class="ev-meta">${esc(bits)}</div>
               ${openTxt ? `<div class="ev-meta">${esc(openTxt)}</div>` : ''}
+              ${els.length ? `<div class="ev-meta" style="color:#8a6a2f">Also working then: ${esc(elseTxt)} — different space, not counted as cover</div>` : ''}
               ${swapTxt ? `<div class="ev-meta" style="color:#8a6fb0; font-weight:700">${esc(swapTxt)}</div>` : ''}
               ${e.notes ? `<div class="ev-note">${esc(e.notes)}</div>` : ''}
             </div>

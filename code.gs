@@ -1,5 +1,22 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v7.10 — Cleanup utilities for entry errors. The delete logic is split
+ *        out of api_deleteShift so a function run from the editor takes
+ *        exactly the same path as the app — row, calendar, swaps, tasks.
+ *        findAmandaSaturdayShifts() / deleteAmandaSaturdayShifts()
+ *        (Amanda never works Saturdays) (2026-09-11)
+ * v7.9 — Nothing can block deleting a shift. api_deleteShift removed the
+ *        calendar event BEFORE the sheet row, so any calendar failure
+ *        threw and left the row behind — the shift came back on every
+ *        refresh and could not be got rid of from the app at all. The
+ *        sheet row is what the app shows, so the row goes first and the
+ *        calendar is best-effort around it (2026-09-11)
+ * v7.8 — The events card shows what it is NOT counting. A shift that
+ *        overlaps in time but sits in another space is not cover — that
+ *        is the point of v7.6 — but a bare "needs shifts" that then walks
+ *        you into a conflict ("Amanda Benner is already working") hides
+ *        half the picture. Those shifts now ride along as `elsewhere` so
+ *        the row can name them before you click Create (2026-09-11)
  * v7.7 — Menu functions never open a modal. getUi().alert() puts a dialog
  *        in the bound spreadsheet; run from the script editor there is
  *        nothing to dismiss it, so installTriggers() looked like it hung
@@ -1131,41 +1148,159 @@ function api_updateShift(data) {
 function api_deleteShift(data) {
   const me = _requireSession_(data.sessionToken);
   if (!me.isManager) throw new Error("Managers only");
+  return _deleteShiftById_(data.eventId, me.name || me.email, true);
+}
 
-  const eventId = data.eventId;
-  const current = _getShiftsCached_().find(s => String(s.eventId) === String(eventId));
-
+/**
+ * v7.10 2026-09-11 — the delete itself, with no session attached, so cleanup
+ * run from the script editor goes through exactly the same path as the app:
+ * same row removal, same calendar handling, same swap and task cleanup. Pass
+ * notify=false to skip the cancellation email (an entry error was never a real
+ * shift, and telling someone their imaginary shift is cancelled is noise).
+ */
+function _deleteShiftById_(eventId, byName, notify) {
+  // v7.9 2026-09-11 — the cache can lag the sheet. Never tell someone a shift
+  // they are looking at doesn't exist without checking the real rows first.
+  let current = _getShiftsCached_().find(s => String(s.eventId) === String(eventId));
+  if (!current) {
+    current = _readAll_(SHEET_SHIFTS).find(s => String(s.eventId) === String(eventId));
+  }
   if (!current) throw new Error("Shift not found");
 
   const prevEmail = _normEmail_(current.staffEmail);
   const prevName = current.staffName || prevEmail;
 
-  const cal = CalendarApp.getCalendarById(CALENDAR_ID);
-  const ev = cal.getEventById(eventId);
-  if (ev) {
-    ev.deleteEvent();
-  }
-
+  // v7.9 2026-09-11 — ROW FIRST. This used to delete the calendar event first,
+  // and every way that can fail — event already gone, id from another calendar,
+  // a recurring instance, a permissions hiccup — threw before the row was
+  // touched. The shift then survived every refresh and there was no way to get
+  // rid of it from the app. The sheet is what the app renders, so the row goes
+  // no matter what the calendar does.
   _deleteWhere_(SHEET_SHIFTS, "eventId", eventId);
   _invalidateShiftsCache_();
 
+  let calWarning = "";
+  try {
+    const cal = CalendarApp.getCalendarById(CALENDAR_ID);
+    const ev = cal ? cal.getEventById(eventId) : null;
+    if (!ev) {
+      calWarning = "No calendar event found for this shift — nothing to remove there.";
+    } else {
+      try {
+        ev.deleteEvent();
+      } catch (inner) {
+        // A recurring instance won't always go with deleteEvent(); the series
+        // will. If it isn't a series either, report the original failure.
+        let series = null;
+        try { series = ev.getEventSeries(); } catch (_) {}
+        if (series) series.deleteEventSeries(); else throw inner;
+      }
+    }
+  } catch (e) {
+    calWarning = "Shift removed, but its calendar event could not be deleted: " + e;
+    Logger.log("deleteShift calendar error for " + eventId + ": " + e);
+  }
+
   // v5.8 — 2026-06-30 — clear out any dangling pending swap request for a
   // shift that no longer exists.
-  _cancelPendingSwapsForEvent_(eventId, "shift deleted by " + (me.name || me.email));
+  _cancelPendingSwapsForEvent_(eventId, "shift deleted by " + (byName || "the app"));
 
   // v6.0 — 2026-07-18 — shift tasks fall back to day tasks (keep date +
   // assignee) instead of vanishing with the shift.
   _releaseTasksForShift_(eventId);
 
-  if (prevEmail && !_asBool_(current.isOpen)) {
-    _emailShiftChanged_({
-      toEmail: prevEmail, toName: prevName, action: "Shift Canceled",
-      shift: { task: current.task, location: current.location, startISO: current.startISO, endISO: current.endISO },
-      changedByName: me.name || me.email
-    });
-  }
+  // v7.9 2026-09-11 — a mail failure must not surface as a failed delete
+  // either; the shift is already gone by this point.
+  try {
+    if (notify !== false && prevEmail && !_asBool_(current.isOpen)) {
+      _emailShiftChanged_({
+        toEmail: prevEmail, toName: prevName, action: "Shift Canceled",
+        shift: { task: current.task, location: current.location, startISO: current.startISO, endISO: current.endISO },
+        changedByName: byName || "a manager"
+      });
+    }
+  } catch (e) { Logger.log("deleteShift cancel email failed: " + e); }
 
-  return { deleted: true, status: "permanently_deleted" };
+  return { deleted: true, status: "permanently_deleted", calWarning: calWarning };
+}
+
+/**********************************************
+ * v7.10 2026-09-11 — ONE-OFF CLEANUP: Amanda's Saturday shifts
+ *
+ * Amanda works pizza nights, never Saturdays, so any Saturday shift in her
+ * name is an entry error. Run findAmandaSaturdayShifts() first — it only
+ * prints. Then deleteAmandaSaturdayShifts() to actually remove them.
+ *
+ * PAST SHIFTS ARE RECORDS. They are what a payroll question gets checked
+ * against, so neither function touches anything before today unless you flip
+ * INCLUDE_PAST to true inside them. Both report how many they skipped.
+ **********************************************/
+
+/** Amanda's Saturday shift rows. Locals only — a top-level const here would
+ *  share the project's one global scope with everything else. */
+function _amandaSaturdayShifts_(includePast) {
+  const email = "abbenner81@yahoo.com";
+  const name  = "amanda benner";
+  const todayCT = Utilities.formatDate(new Date(), TZ_CENTRAL, "yyyy-MM-dd");
+
+  return _readAll_(SHEET_SHIFTS).filter(r => {
+    if (!r.startISO) return false;
+    const who = _normEmail_(r.staffEmail) === email ||
+                String(r.staffName || "").trim().toLowerCase() === name;
+    if (!who) return false;
+    const d = new Date(r.startISO);
+    if (isNaN(d)) return false;
+    if (Utilities.formatDate(d, TZ_CENTRAL, "EEE") !== "Sat") return false;
+    if (!includePast && Utilities.formatDate(d, TZ_CENTRAL, "yyyy-MM-dd") < todayCT) return false;
+    return true;
+  }).sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+}
+
+function _logAmandaRow_(r) {
+  const d = new Date(r.startISO);
+  Logger.log("  " + Utilities.formatDate(d, TZ_CENTRAL, "EEE MMM d yyyy h:mm a")
+    + (r.endISO ? " – " + Utilities.formatDate(new Date(r.endISO), TZ_CENTRAL, "h:mm a") : "")
+    + "  " + (r.task || "?") + " @ " + (r.location || "no space")
+    + (_asBool_(r.isOpen) ? "  [OPEN]" : "")
+    + "   id " + r.eventId);
+}
+
+/** PREVIEW ONLY — changes nothing. */
+function findAmandaSaturdayShifts() {
+  const INCLUDE_PAST = false;
+  const rows = _amandaSaturdayShifts_(INCLUDE_PAST);
+  const all  = _amandaSaturdayShifts_(true);
+  Logger.log("Amanda Saturday shifts that WOULD be deleted: " + rows.length);
+  rows.forEach(_logAmandaRow_);
+  const skipped = all.length - rows.length;
+  if (skipped > 0) Logger.log(skipped + " past Saturday shift(s) left alone — they are records. "
+    + "Set INCLUDE_PAST = true in both functions if those are wrong too.");
+  if (!rows.length) Logger.log("Nothing to delete.");
+}
+
+/** DELETES. Run findAmandaSaturdayShifts() first and read the list. */
+function deleteAmandaSaturdayShifts() {
+  const INCLUDE_PAST = false;
+  const rows = _amandaSaturdayShifts_(INCLUDE_PAST);
+  if (!rows.length) { Logger.log("Nothing to delete."); return; }
+
+  Logger.log("Deleting " + rows.length + " Saturday shift(s) for Amanda Benner:");
+  let gone = 0;
+  rows.forEach(r => {
+    _logAmandaRow_(r);
+    try {
+      // notify=false: an entry error was never a real shift, so no cancellation
+      // email goes out for it.
+      const res = _deleteShiftById_(r.eventId, "Saturday cleanup", false);
+      gone++;
+      if (res && res.calWarning) Logger.log("     " + res.calWarning);
+    } catch (e) {
+      Logger.log("     FAILED: " + e);
+    }
+  });
+  _invalidateShiftsCache_();
+  Logger.log("Done. " + gone + " of " + rows.length + " removed. "
+    + "Reload the scheduler to see the change.");
 }
 
 function api_createOpenShift(data) {
@@ -3144,6 +3279,26 @@ function _eventsWithStaffing_(start, end, isManager) {
     const named = overlapping.filter(r => !_asBool_(r.isOpen) && r.staffName);
     const open  = overlapping.filter(r =>  _asBool_(r.isOpen));
 
+    // v7.8 2026-09-11 — shifts overlapping in TIME but in another SPACE. Not
+    // cover, deliberately. But the conflict check on save is person+time only,
+    // so without this the card says "nobody is on it" and the save then says
+    // "that person is already working" — two right answers that contradict.
+    // Real case: a Pizza Friday shift coded Distillery when pizza runs in the
+    // tasting room. Capped at 6; a busy night would otherwise be a wall.
+    const elsewhere = shifts.filter(r => {
+      const rs = new Date(r.startISO);
+      const re = new Date(r.endISO || r.startISO);
+      if (!(rs < en && re > s)) return false;
+      const rl = String(r.location || "").trim().replace(/^the\s+/i, "");
+      return (rl || DEFAULT_SPACE).toLowerCase() !== space.toLowerCase();
+    }).slice(0, 6).map(r => ({
+      name:     _asBool_(r.isOpen) ? "OPEN" : (r.staffName || ""),
+      task:     r.task,
+      location: r.location,
+      startISO: r.startISO,
+      endISO:   r.endISO
+    }));
+
     // v7.3 2026-09-05 — split the named cover into settled vs pending-swap.
     // The event is only "staffed" if at least one named person is not
     // actively trying to get off it.
@@ -3204,6 +3359,8 @@ function _eventsWithStaffing_(start, end, isManager) {
            : open.length  ? "unclaimed"
            :                "unstaffed",
       swapRisk: swapRisk,
+      elsewhere: elsewhere,      // v7.8 2026-09-11 — working then, but not here
+
       suggestedStartISO: sugStart.toISOString(),
       suggestedEndISO:   sugEnd.toISOString(),
       coverStartISO: coverStart ? coverStart.toISOString() : "",
