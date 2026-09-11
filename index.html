@@ -78,6 +78,21 @@
     .btn:disabled{ opacity:0.6; cursor:not-allowed; pointer-events:none; }
     .btn.loading{ opacity:0.7; pointer-events:none; }
 
+    /* v3.31 2026-09-11 — Jump to date. Sits in the same row as the arrows and
+       shows the date you are currently parked on, so it reads as a position
+       indicator as much as a control. Deliberately type="date" even in month
+       mode: type="month" is still unsupported in Firefox and shaky in older
+       Safari, where it silently degrades to a text box. */
+    .jump-date{
+      appearance:none; -webkit-appearance:none; background:#fff;
+      border:1px solid var(--border); border-radius:10px; color:var(--text);
+      font-family:inherit; font-weight:700; font-size:12px; line-height:1;
+      padding:8px 10px; min-height:36px; max-width:160px; cursor:pointer;
+    }
+    .jump-date::-webkit-calendar-picker-indicator{ cursor:pointer; opacity:0.6; }
+    .jump-date:disabled{ opacity:0.6; pointer-events:none; }
+    .nav-loading .jump-date { opacity:0.5; pointer-events:none; }
+
     .nav-loading .btn { opacity:0.5; pointer-events:none; }
     .nav-loading .seg-btn { opacity:0.5; pointer-events:none; }
 
@@ -133,6 +148,20 @@
     .ev-pill.atrisk    { background:#8a6fb0; color:#fff; }
     .ev-pill.staffed   { background:var(--ok); color:#fff; }
     .ev-pill.tentative { background:var(--muted); color:#fff; }
+    /* v3.32 2026-09-11 — two rows that are not problems: a week nobody has
+       written yet, and an event somebody has said needs no one. Neither gets
+       a red or amber treatment; both stay visible. */
+    .ev-pill.later   { background:#fff; color:var(--muted); border:1px solid var(--border); }
+    .ev-pill.covered { background:var(--ok); color:#fff; }
+    .ev-row.later    { border-left-color:var(--border); background:#FBFBF6; }
+    .ev-row.covered  { border-left-color:var(--ok); background:#FBFBF6; }
+    .ev-sec { display:flex; justify-content:space-between; align-items:baseline; gap:8px;
+              font-size:12px; font-weight:700; color:var(--muted);
+              border-top:1px solid var(--border); margin:12px 0 8px; padding-top:10px; }
+    .ev-sec .ev-sec-toggle { background:none; border:none; padding:0; cursor:pointer;
+              font:inherit; font-weight:800; color:var(--accent); text-decoration:underline; }
+    .ev-act { text-align:right; }
+    .ev-act .btn { margin-top:6px; }
     /* v3.28 2026-09-10 — events now come from two calendars. The badge says
        which, because "House programming" means Toast has never heard of it
        and nobody should go looking for an invoice. */
@@ -714,6 +743,19 @@
   let renderTimer = null;
 
   function snapToMonday(d) { const x = new Date(d); const day = x.getDay(); const diff = day === 0 ? -6 : 1 - day; x.setDate(x.getDate() + diff); return x; }
+
+  // v3.31 2026-09-11 — Jump to date.
+  // The arrows are fine for "next week" and useless for "what have we got on
+  // New Year's Eve". One control, used by every nav row (schedule week / month
+  // / grid and both payroll summaries): its value is the date you are looking
+  // at now, so it doubles as a readout. Noon, not midnight, so a DST boundary
+  // can never roll the date backwards a day.
+  function jumpControlHtml(isMonth, disabled) {
+    const anchor = isMonth ? monthAnchor : weekStart;
+    return `<input type="date" class="jump-date" value="${esc(isoDate(anchor))}"
+      ${disabled ? 'disabled' : 'onchange="jumpToDate(this.value)"'}
+      title="Jump to date" aria-label="Jump to date">`;
+  }
 
   function addDays(d,n) { const x=new Date(d); x.setDate(x.getDate()+n); return x; }
   function isoDate(d) { const y=d.getFullYear(), m=d.getMonth()+1, day=d.getDate(); return y+'-'+(m<10?'0':'')+m+'-'+(day<10?'0':'')+day; }
@@ -1582,6 +1624,7 @@
             <button class="btn small" disabled>◀</button>
             <button class="btn small" disabled>Today</button>
             <button class="btn small" disabled>▶</button>
+            ${jumpControlHtml(mode === 'month', true)}<!-- v3.31 2026-09-11 — same row height as the real nav, so the card doesn't jump when data lands -->
           </div>
           <div style="font-weight:700; font-size:14px; text-align:right">${esc(label)}</div>
         </div>
@@ -1772,6 +1815,7 @@
              <button class="btn small" onclick="moveDate(-1)">◀</button>
              <button class="btn small" onclick="jumpToday()">Today</button>
              <button class="btn small" onclick="moveDate(1)">▶</button>
+             ${jumpControlHtml(mode === 'month', false)}<!-- v3.31 2026-09-11 -->
           </div>
           <div style="font-weight:700; font-size:14px; text-align:right">${esc(label)}</div>
         </div>
@@ -1841,7 +1885,7 @@
         const dayName = d.toLocaleDateString(undefined, {weekday:'long'});
         const dayDateStr = d.toLocaleDateString(undefined, {month:'short', day:'numeric'});
 
-        dayCards.push(`<div class="card" style="padding:12px; margin-bottom:10px;"${isToday ? ' data-today="1"' : ''}>
+        dayCards.push(`<div class="card" style="padding:12px; margin-bottom:10px;" data-daydate="${iso}"${isToday ? ' data-today="1"' : ''}>
           <div class="day-header ${isToday ? 'today' : ''}">
             <span class="day-name">${esc(dayName)}${isToday ? ' — Today' : ''}</span>
             <span class="day-date">${esc(dayDateStr)}</span>
@@ -1893,7 +1937,7 @@
           const isToday = k === todayIso;
           const mDayName = bDate.toLocaleDateString(undefined, {weekday:'long'});
           const mDayDate = bDate.toLocaleDateString(undefined, {month:'short', day:'numeric'});
-          html += `<div style="margin-bottom:12px; border:1px solid var(--border); border-radius:12px; padding:10px;"${isToday ? ' data-today="1"' : ''}>
+          html += `<div style="margin-bottom:12px; border:1px solid var(--border); border-radius:12px; padding:10px;" data-daydate="${k}"${isToday ? ' data-today="1"' : ''}>
             <div style="display:flex; justify-content:space-between; align-items:center; padding-bottom:8px; margin-bottom:8px; border-bottom:1px solid var(--border); ${isToday ? 'color:var(--accent);' : ''}">
               <span style="font-weight:800; font-size:14px;">${esc(mDayName)}${isToday ? ' — Today' : ''}</span>
               <span style="font-size:12px; font-weight:600; color:var(--muted);">${esc(mDayDate)}</span>
@@ -1916,6 +1960,14 @@
     if (scrollToTodayPending) {
       scrollToTodayPending = false;
       requestAnimationFrame(scrollTodayIntoView);
+    }
+
+    // v3.31 2026-09-11 — a jumped-to date gets the same treatment: land on the
+    // day you asked for, not at the top of the week it happens to sit in.
+    if (scrollDatePending) {
+      const jumpIso = scrollDatePending;
+      scrollDatePending = null;
+      requestAnimationFrame(() => scrollDateIntoView(jumpIso));
     }
   }
 
@@ -2480,6 +2532,7 @@
               <button class="btn small" onclick="moveDate(-1)">◀</button>
               <button class="btn small" onclick="jumpToday()">This Week</button>
               <button class="btn small" onclick="moveDate(1)">▶</button>
+              ${jumpControlHtml(false, false)}<!-- v3.31 2026-09-11 -->
             </div>
             <div style="font-size:13px; font-weight:700; color:var(--muted); text-align:right;">${esc(data.label)}</div>
           </div>
@@ -2505,6 +2558,7 @@
               <button class="btn small" onclick="moveDate(-1)">◀</button>
               <button class="btn small" onclick="jumpToday()">This Month</button>
               <button class="btn small" onclick="moveDate(1)">▶</button>
+              ${jumpControlHtml(true, false)}<!-- v3.31 2026-09-11 -->
             </div>
             <div style="font-size:13px; font-weight:700; color:var(--muted); text-align:right;">${esc(data.label)}</div>
           </div>
@@ -2566,13 +2620,154 @@
     }
   }
 
+  // v3.32 2026-09-11 — Three kinds of row, and only one of them is a problem.
+  // Karl, 2026-09-11: "'needs a shift' in November might mean we haven't
+  // entered our regular schedule yet or it is suggesting something additional."
+  // Both readings were available because the card graded 60 days of calendar
+  // against a schedule that only exists a week or two out. The backend (v7.11)
+  // now says how far the schedule is actually built and which events have been
+  // declared covered; this splits the card on those two lines so a red row can
+  // only ever mean one thing.
+  let showCoveredEvents = false;
+  let showLaterEvents   = false;
+
+  function evActionsHtml(e, group) {
+    const st = new Date(e.startISO);
+    const en = e.endISO ? new Date(e.endISO) : null;
+    const ss = e.suggestedStartISO ? new Date(e.suggestedStartISO) : null;
+    const se = e.suggestedEndISO   ? new Date(e.suggestedEndISO)   : null;
+
+    if (group === "covered") {
+      return `<button class="btn small js-ev-unrule"
+        data-id="${esc(e.ruleId || '')}"
+        data-scope="${esc(e.ruleScope || '')}"
+        data-key="${esc(e.ruleScope === 'series' ? (e.seriesKey || '') : (e.occKey || ''))}">Undo</button>`;
+    }
+
+    // Past the horizon "Create shift" is still the right button — long-range
+    // planning is a real thing — it just isn't the urgent one, so it loses the
+    // accent colour.
+    const accent = (group === "open" && e.state === "unstaffed") ? "accent " : "";
+    const main = e.state === "unstaffed"
+      ? `<button class="btn ${accent}small js-ev-create"
+           data-date="${esc(isoDate(ss || st))}"
+           data-start="${esc(fmtTime24(ss || st))}"
+           data-end="${esc(se ? fmtTime24(se) : (en ? fmtTime24(en) : ''))}"
+           data-loc="${esc(e.space || '')}"
+           data-notes="${esc(e.title + (e.notes ? ' — ' + e.notes : ''))}">Create shift</button>`
+      : `<button class="btn small js-ev-week" data-date="${esc(isoDate(st))}">Go to week</button>`;
+
+    return main + `<div><button class="btn small js-ev-nostaff">No extra staff</button></div>`;
+  }
+
+  // The two-way choice, shown in place of the buttons after "No extra staff".
+  // Series is offered first and worded with the event's own name: Zoho expands
+  // recurrence server-side, so trivia is ~50 separate events and one-at-a-time
+  // would be 50 clicks.
+  function evNoStaffChoiceHtml(label) {
+    const name = String(label || "this event").trim();
+    const short = name.length > 22 ? name.slice(0, 21) + "…" : name;
+    return `
+      <div class="ev-meta" style="margin-bottom:4px">No extra staff needed for…</div>
+      <div><button class="btn small js-ev-rule" data-scope="series">Every ${esc(short)}</button></div>
+      <div><button class="btn small js-ev-rule" data-scope="once">Just this one</button></div>
+      <div><button class="btn small js-ev-nostaff-cancel" style="border:none">Cancel</button></div>`;
+  }
+
+  function evRowHtml(e, group, horizonLabel) {
+    const st = new Date(e.startISO);
+    const en = e.endISO ? new Date(e.endISO) : null;
+    const day = st.toLocaleDateString(undefined,{weekday:'short', month:'short', day:'numeric'});
+    const when = `${day} · event ${fmtTime(st)}${en ? ' – ' + fmtTime(en) : ''}`;
+
+    // v3.27 2026-09-05 — the event window is when guests are there; the
+    // staffing window is what you actually schedule. Show both, because
+    // they are never the same and the second is the actionable one.
+    const cs = e.coverStartISO ? new Date(e.coverStartISO) : null;
+    const ce = e.coverEndISO   ? new Date(e.coverEndISO)   : null;
+    const ss = e.suggestedStartISO ? new Date(e.suggestedStartISO) : null;
+    const se = e.suggestedEndISO   ? new Date(e.suggestedEndISO)   : null;
+    // v3.32 2026-09-11 — "suggested shift 6:00 – 9:30" read as though it might
+    // be proposing a SECOND shift on top of one already there. It never was:
+    // it only ever appears when nothing was found. Say that out loud.
+    const staffWhen = cs
+      ? `shift ${fmtTime(cs)}${ce ? ' – ' + fmtTime(ce) : ''}`
+      : (ss ? `nothing scheduled — suggest ${fmtTime(ss)}${se ? ' – ' + fmtTime(se) : ''}` : '');
+
+    // v3.29 2026-09-10 — an event that names no space is in the tasting room
+    // (house rule), and the backend matches it against shifts the same way.
+    const bits = [e.space + (e.spaceAssumed ? ' (assumed)' : ''),
+                  e.guests ? e.guests + ' guests' : '', e.occasion]
+      .filter(Boolean).join(' · ');
+
+    // v3.26 2026-09-05 — "swap pending" is the fourth state: a name is on
+    // the shift, but that person has asked to hand it off.
+    const stateLabel = e.state === "unstaffed" ? "needs shifts"
+                     : e.state === "atrisk"    ? "swap pending"
+                     :                           "unclaimed";
+    const pill  = group === "later"   ? { cls: "later",   txt: "not scheduled yet" }
+                : group === "covered" ? { cls: "covered", txt: "no staff needed" }
+                :                       { cls: e.state,   txt: stateLabel };
+
+    const openTxt = (e.openShifts || []).map(o => `${o.task} — OPEN`).join(", ");
+
+    // v3.30 2026-09-11 — somebody may already be working at that hour in a
+    // different space. Not cover, but you need to see it before you create a
+    // shift the conflict check is going to reject.
+    const els = e.elsewhere || [];
+    const elseTxt = els.slice(0, 3)
+      .map(o => `${o.name || 'OPEN'} — ${o.task}${o.location ? ', ' + o.location : ''}`)
+      .join('; ') + (els.length > 3 ? ` +${els.length - 3} more` : '');
+    const swapTxt = (e.swapRisk || []).map(w =>
+      `${w.name} (${w.task}) wants out — ${w.status === "ACCEPTED" ? "taken, needs your approval" : "no taker yet"}`
+    ).join("; ");
+
+    const note = group === "later"
+      ? `<div class="ev-meta" style="color:var(--muted)">No shifts entered for that week yet${horizonLabel ? ` — the schedule is built through ${esc(horizonLabel)}` : ''}.</div>`
+      : group === "covered"
+      ? `<div class="ev-meta" style="color:var(--muted)">Covered by regular staffing${e.ruleScope === 'series' ? ' — every one of these' : ' — this one only'}${e.ruleBy ? ` · set by ${esc(e.ruleBy)}` : ''}</div>`
+      : '';
+
+    return `
+      <div class="ev-row ${esc(group === 'open' ? e.state : group)}">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:8px">
+          <div style="flex:1; min-width:0">
+            <div class="ev-title">${esc(e.title)}<span class="ev-src ${esc(e.source || '')}">${esc(e.sourceLabel || '')}</span></div>
+            <div class="ev-meta">${esc(when)}</div>
+            ${group === 'covered' ? '' : (staffWhen ? `<div class="ev-meta" style="font-weight:700; color:var(--text)">${esc(staffWhen)}</div>` : '')}
+            <div class="ev-meta">${esc(bits)}</div>
+            ${note}
+            ${openTxt ? `<div class="ev-meta">${esc(openTxt)}</div>` : ''}
+            ${els.length ? `<div class="ev-meta" style="color:#8a6a2f">Also working then: ${esc(elseTxt)} — different space, not counted as cover</div>` : ''}
+            ${swapTxt ? `<div class="ev-meta" style="color:#8a6fb0; font-weight:700">${esc(swapTxt)}</div>` : ''}
+            ${e.notes ? `<div class="ev-note">${esc(e.notes)}</div>` : ''}
+          </div>
+          <div class="ev-act" style="flex-shrink:0"
+               data-once="${esc(e.occKey || '')}"
+               data-series="${esc(e.seriesKey || '')}"
+               data-label="${esc(e.title)}">
+            <div><span class="ev-pill ${esc(pill.cls)}">${esc(pill.txt)}</span></div>
+            ${/^tentative$/i.test(e.orderStatus || '') ? `<div style="margin-top:4px"><span class="ev-pill tentative">tentative</span></div>` : ''}
+            ${evActionsHtml(e, group)}
+          </div>
+        </div>
+      </div>`;
+  }
+
   function renderEventsCard(res) {
     if (!res || !res.ok || !Array.isArray(res.events)) return "";
     const evs = res.events;
     if (!evs.length) return "";
 
-    const needs = evs.filter(e => e.state !== "staffed");
+    const horizonLabel = res.horizonLabel || "";
+    const needs   = evs.filter(e => e.state !== "staffed");
     const okCount = evs.length - needs.length;
+
+    // v3.32 2026-09-11 — the split. `open` is the only group that means
+    // somebody has to do something.
+    const covered = needs.filter(e => e.noStaffNeeded);
+    const later   = needs.filter(e => !e.noStaffNeeded && e.beyondHorizon);
+    const open    = needs.filter(e => !e.noStaffNeeded && !e.beyondHorizon);
 
     if (!needs.length) {
       return `<div class="card"><div class="row" style="justify-content:space-between">
@@ -2581,78 +2776,6 @@
       </div></div>`;
     }
 
-    const rows = needs.map(e => {
-      const st = new Date(e.startISO);
-      const en = e.endISO ? new Date(e.endISO) : null;
-      const day = st.toLocaleDateString(undefined,{weekday:'short', month:'short', day:'numeric'});
-      const when = `${day} · event ${fmtTime(st)}${en ? ' – ' + fmtTime(en) : ''}`;
-
-      // v3.27 2026-09-05 — the event window is when guests are there; the
-      // staffing window is what you actually schedule. Show both, because
-      // they are never the same and the second is the actionable one.
-      const cs = e.coverStartISO ? new Date(e.coverStartISO) : null;
-      const ce = e.coverEndISO   ? new Date(e.coverEndISO)   : null;
-      const ss = e.suggestedStartISO ? new Date(e.suggestedStartISO) : null;
-      const se = e.suggestedEndISO   ? new Date(e.suggestedEndISO)   : null;
-      const staffWhen = cs
-        ? `shift ${fmtTime(cs)}${ce ? ' – ' + fmtTime(ce) : ''}`
-        : (ss ? `suggested shift ${fmtTime(ss)}${se ? ' – ' + fmtTime(se) : ''}` : '');
-      // v3.29 2026-09-10 — an event that names no space is in the tasting room
-      // (house rule), and the backend matches it against shifts the same way.
-      // Flag it as assumed so a wrong guess is visible rather than silent.
-      const bits = [e.space + (e.spaceAssumed ? ' (assumed)' : ''),
-                    e.guests ? e.guests + ' guests' : '', e.occasion]
-        .filter(Boolean).join(' · ');
-
-      // v3.26 2026-09-05 — "swap pending" is the fourth state: a name is on
-      // the shift, but that person has asked to hand it off.
-      const label = e.state === "unstaffed" ? "needs shifts"
-                  : e.state === "atrisk"    ? "swap pending"
-                  :                           "unclaimed";
-      const openTxt = (e.openShifts || []).map(o => `${o.task} — OPEN`).join(", ");
-
-      // v3.30 2026-09-11 — somebody may already be working at that hour in a
-      // different space. Not cover, but you need to see it before you create a
-      // shift the conflict check is going to reject.
-      const els = e.elsewhere || [];
-      const elseTxt = els.slice(0, 3)
-        .map(o => `${o.name || 'OPEN'} — ${o.task}${o.location ? ', ' + o.location : ''}`)
-        .join('; ') + (els.length > 3 ? ` +${els.length - 3} more` : '');
-      const swapTxt = (e.swapRisk || []).map(w =>
-        `${w.name} (${w.task}) wants out — ${w.status === "ACCEPTED" ? "taken, needs your approval" : "no taker yet"}`
-      ).join("; ");
-
-      const action = e.state === "unstaffed"  // atrisk/unclaimed both jump to the week
-        ? `<button class="btn accent small js-ev-create"
-             data-date="${esc(isoDate(ss || st))}"
-             data-start="${esc(fmtTime24(ss || st))}"
-             data-end="${esc(se ? fmtTime24(se) : (en ? fmtTime24(en) : ''))}"
-             data-loc="${esc(e.space || '')}"
-             data-notes="${esc(e.title + (e.notes ? ' — ' + e.notes : ''))}">Create shift</button>`
-        : `<button class="btn small js-ev-week" data-date="${esc(isoDate(st))}">Go to week</button>`;
-
-      return `
-        <div class="ev-row ${esc(e.state)}">
-          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:8px">
-            <div style="flex:1; min-width:0">
-              <div class="ev-title">${esc(e.title)}<span class="ev-src ${esc(e.source || '')}">${esc(e.sourceLabel || '')}</span></div>
-              <div class="ev-meta">${esc(when)}</div>
-              ${staffWhen ? `<div class="ev-meta" style="font-weight:700; color:var(--text)">${esc(staffWhen)}</div>` : ''}
-              <div class="ev-meta">${esc(bits)}</div>
-              ${openTxt ? `<div class="ev-meta">${esc(openTxt)}</div>` : ''}
-              ${els.length ? `<div class="ev-meta" style="color:#8a6a2f">Also working then: ${esc(elseTxt)} — different space, not counted as cover</div>` : ''}
-              ${swapTxt ? `<div class="ev-meta" style="color:#8a6fb0; font-weight:700">${esc(swapTxt)}</div>` : ''}
-              ${e.notes ? `<div class="ev-note">${esc(e.notes)}</div>` : ''}
-            </div>
-            <div style="text-align:right; flex-shrink:0">
-              <div><span class="ev-pill ${esc(e.state)}">${esc(label)}</span></div>
-              ${/^tentative$/i.test(e.orderStatus || '') ? `<div style="margin-top:4px"><span class="ev-pill tentative">tentative</span></div>` : ''}
-              <div style="margin-top:6px">${action}</div>
-            </div>
-          </div>
-        </div>`;
-    }).join("");
-
     // v3.28 2026-09-10 — if a calendar didn't answer, the count above is a lie
     // by omission. A quiet card is fine; a quiet card that's missing a whole
     // calendar is not.
@@ -2660,15 +2783,80 @@
       ? `<div class="ev-meta" style="color:var(--danger); font-weight:700; margin:-4px 0 8px">${esc(res.warnings.join(' '))}</div>`
       : '';
 
+    const head = open.length
+      ? `<div style="font-weight:700; font-size:14px">Events needing staff</div>
+         <span class="muted" style="font-size:11px">${open.length} inside the built schedule · ${evs.length} in 60 days</span>`
+      : `<div style="font-weight:700; font-size:14px">Events</div>
+         <span class="ev-pill staffed">nothing open</span>`;
+
+    const openHtml = open.length
+      ? open.map(e => evRowHtml(e, "open", horizonLabel)).join("")
+      : `<div class="ev-meta" style="padding:2px 0 4px">Everything inside the built schedule is covered${horizonLabel ? ` — through ${esc(horizonLabel)}` : ''}.</div>`;
+
+    const laterHtml = later.length ? `
+      <div class="ev-sec">
+        <span>Not scheduled yet · ${later.length}${horizonLabel ? ` · after ${esc(horizonLabel)}` : ''}</span>
+        <button class="ev-sec-toggle" onclick="toggleLaterEvents()">${showLaterEvents ? 'hide' : 'show'}</button>
+      </div>
+      ${showLaterEvents ? later.map(e => evRowHtml(e, "later", horizonLabel)).join("") : ''}` : '';
+
+    const coveredHtml = covered.length ? `
+      <div class="ev-sec">
+        <span>Covered by regular staffing · ${covered.length}</span>
+        <button class="ev-sec-toggle" onclick="toggleCoveredEvents()">${showCoveredEvents ? 'hide' : 'show'}</button>
+      </div>
+      ${showCoveredEvents ? covered.map(e => evRowHtml(e, "covered", horizonLabel)).join("") : ''}` : '';
+
     return `
       <div class="card">
-        <div class="row" style="justify-content:space-between; margin-bottom:10px">
-          <div style="font-weight:700; font-size:14px">Events needing staff</div>
-          <span class="muted" style="font-size:11px">${needs.length} of ${evs.length} · next 60 days</span>
-        </div>
+        <div class="row" style="justify-content:space-between; margin-bottom:10px">${head}</div>
         ${warn}
-        ${rows}
+        ${openHtml}
+        ${laterHtml}
+        ${coveredHtml}
       </div>`;
+  }
+
+  // v3.32 2026-09-11 — both toggles repaint the card from the copy already in
+  // hand. No fetch, so a collapsed section can never cost a round trip.
+  function repaintEventsCard() {
+    const cur = document.getElementById("eventsCard");
+    if (cur && eventsCache) cur.innerHTML = renderEventsCard(eventsCache);
+  }
+  window.toggleLaterEvents   = function() { showLaterEvents   = !showLaterEvents;   repaintEventsCard(); };
+  window.toggleCoveredEvents = function() { showCoveredEvents = !showCoveredEvents; repaintEventsCard(); };
+
+  // v3.32 2026-09-11 — write a "no extra staff needed" rule, then refetch the
+  // card. Scoped to the events card only: a failure here leaves the schedule
+  // itself untouched (the v3.22/v3.23 rule).
+  async function setEventStaffingRule(scope, ds, btn) {
+    const key = scope === "series" ? ds.series : ds.once;
+    if (!key) { showToast("Can't identify that event"); return; }
+    if (btn) btn.disabled = true;
+    try {
+      await api("setEventStaffing", { sessionToken, scope: scope, key: key, label: ds.label || "" });
+      invalidateCache(["listEvents"]);
+      eventsCache = null;
+      await loadEventsCard();
+      showToast(scope === "series" ? "Marked — every one of these" : "Marked — this one only");
+    } catch (err) {
+      if (btn) btn.disabled = false;
+      handleError(err);
+    }
+  }
+
+  async function clearEventStaffingRule(ds, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      await api("clearEventStaffing", { sessionToken, id: ds.id || "", scope: ds.scope || "", key: ds.key || "" });
+      invalidateCache(["listEvents"]);
+      eventsCache = null;
+      await loadEventsCard();
+      showToast("Back on the list");
+    } catch (err) {
+      if (btn) btn.disabled = false;
+      handleError(err);
+    }
   }
 
   // v3.25 2026-09-05 — jump the schedule to the week holding a given date
@@ -2807,6 +2995,24 @@
       goToEventWeek(evWeek.dataset.date);
       return;
     }
+    // v3.32 2026-09-11 — "no extra staff needed", asked in place rather than
+    // in a modal: the row you are deciding about stays on screen.
+    const evNoStaff = e.target.closest('.js-ev-nostaff');
+    if (evNoStaff) {
+      const box = evNoStaff.closest('.ev-act');
+      if (box) box.innerHTML = evNoStaffChoiceHtml(box.dataset.label);
+      return;
+    }
+    const evNoStaffCancel = e.target.closest('.js-ev-nostaff-cancel');
+    if (evNoStaffCancel) { repaintEventsCard(); return; }
+    const evRule = e.target.closest('.js-ev-rule');
+    if (evRule) {
+      const box = evRule.closest('.ev-act');
+      if (box) setEventStaffingRule(evRule.dataset.scope, box.dataset, evRule);
+      return;
+    }
+    const evUnrule = e.target.closest('.js-ev-unrule');
+    if (evUnrule) { clearEventStaffingRule(evUnrule.dataset, evUnrule); return; }
 
     const note = e.target.closest('.js-note');
     if (note && bootstrap.me.isManager) {
@@ -3136,13 +3342,22 @@
   }
   // v3.21 2026-08-23 — scroll today's day card under the sticky header.
   let scrollToTodayPending = false;
-  function scrollTodayIntoView() {
-    const target = document.querySelector('[data-today="1"]');
+  let scrollDatePending = null;               // v3.31 2026-09-11 — jump target
+  function scrollCardIntoView(target) {
     if (!target) return;
     const header = document.querySelector('header');
     const offset = (header ? header.getBoundingClientRect().height : 0) + 8;
     const y = target.getBoundingClientRect().top + window.pageYOffset - offset;
     window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
+  }
+  function scrollTodayIntoView() {
+    scrollCardIntoView(document.querySelector('[data-today="1"]'));
+  }
+  // v3.31 2026-09-11 — the grid has no per-day card to scroll to and the month
+  // view only renders days that have something on them, so a missing target is
+  // normal: leave the page where it is rather than guessing.
+  function scrollDateIntoView(iso) {
+    scrollCardIntoView(document.querySelector('[data-daydate="' + iso + '"]'));
   }
 
   function jumpToday() {
@@ -3160,6 +3375,28 @@
     showViewLoading();
     render(false);                         // v3.22 2026-09-03 — see moveDate()
   }
+
+  // v3.31 2026-09-11 — Jump to a date from the nav row. Moves both anchors so
+  // the week, month and grid views all land on the same date, whichever you
+  // switch to afterwards. Uses render(false), never render(true) — navigation
+  // must not call invalidateAll() (see the v3.22 rule).
+  window.jumpToDate = function(val) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(val || ""))) return;
+    const d = new Date(val + "T12:00:00");
+    if (isNaN(d.getTime())) return;
+
+    const day = new Date(d);
+    day.setHours(0, 0, 0, 0);
+    weekStart = snapToMonday(day);
+    monthAnchor = new Date(d.getFullYear(), d.getMonth(), 1);
+
+    scrollToTodayPending = false;
+    scrollDatePending = (activeTab === 'schedule') ? val : null;
+
+    saveViewState();
+    showViewLoading();
+    render(false);
+  };
 
   window.toggleMyShifts = function(el) {
     filterMyShifts = el.checked;

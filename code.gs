@@ -1,5 +1,14 @@
 /**********************************************
  * Sturgeon Spirits — Staff Scheduler (Apps Script)
+ * v7.11 — The card stops crying wolf. Two changes, one cause: it looked
+ *        60 days out at a schedule that only exists a week or two
+ *        ahead, so most red rows meant "that week isn't written yet",
+ *        not "nobody is on the bar". (a) A scheduling horizon derived
+ *        from the shifts themselves — past it an event reads "not
+ *        scheduled yet" and never reaches the digest. (b) An
+ *        EventStaffing sheet of "no extra staff needed" rules, per
+ *        night or per recurring title, because some programming is
+ *        covered by whoever is already on the bar (2026-09-11)
  * v7.10 — Cleanup utilities for entry errors. The delete logic is split
  *        out of api_deleteShift so a function run from the editor takes
  *        exactly the same path as the app — row, calendar, swaps, tasks.
@@ -149,6 +158,30 @@ const DEFAULT_SPACE = "Tasting Room";
 // The card looks 60 days out; nobody acts on a gap that far away, so the
 // manager email is deliberately shorter-sighted.
 const OPS_NOTIFY_DAYS = 21;
+
+// v7.11 2026-09-11 — THE SCHEDULING HORIZON — stated by Karl, 2026-09-11:
+// "we don't necessarily have the full schedule out several months in advance."
+// The card looked 60 days ahead and graded every one of those days as though
+// the schedule existed, so an event five weeks out came up red for the only
+// reason that nobody has written that week yet. Red that is usually wrong is
+// red you learn to ignore, and it takes the real gaps down with it.
+//
+// The horizon is DERIVED, not configured — a setting would be one more thing
+// to keep true. Walk forward from this week and stop at the first week
+// carrying fewer than HORIZON_MIN_SHIFTS shifts; that is how far the schedule
+// is genuinely built. Events past it are "not scheduled yet": shown, never
+// red, never emailed.
+const HORIZON_MIN_SHIFTS = 3;
+// A ceiling, so one Production shift pencilled into December can't drag the
+// horizon out past everything and turn the whole card red again.
+const HORIZON_MAX_WEEKS = 12;
+
+// v7.11 2026-09-11 — "no extra staff needed" rules. Some programming is
+// covered by whoever is already on the bar — Karl: "Smartish Trivia does not
+// need an extra staffer, the usual tasting room staffing for that night is
+// enough." Rules live in a sheet rather than Script Properties so they can be
+// read and removed by hand, like everything else this app decides from.
+const SHEET_EVENT_RULES = "EventStaffing";
 // Title shape on the ops calendar: "Programming — Cribbage and Cocktails".
 const OPS_TITLE_PREFIXES = ["Programming", "Private", "Harvest Host"];
 // The aggregation script stamps every event it copies with this marker.
@@ -449,6 +482,8 @@ function _route_(action, data) {
     case "dashRequests":  return api_dashboardRequests(data);
     case "dashAdmin":     return api_dashboardAdmin(data);
     case "listEvents":    return api_listEvents(data); // v7.2 2026-09-05
+    case "setEventStaffing":   return api_setEventStaffing(data);   // v7.11 2026-09-11
+    case "clearEventStaffing": return api_clearEventStaffing(data); // v7.11 2026-09-11
     case "bootstrap":        return api_bootstrap(data);
     case "initLoad":         return api_initLoad(data); // v6.8 2026-08-02
     case "listWeek":         return api_listWeek(data);
@@ -3238,10 +3273,16 @@ function _eventsWithStaffing_(start, end, isManager) {
       : "t#" + String(it.title).toLowerCase().replace(/\s+/g, " ").trim() + "@" + it.start.getTime();
     if (seen[key]) return;
     seen[key] = true;
+    it.occKey = key;        // v7.11 2026-09-11 — the per-occurrence rule key
     items.push(it);
   });
 
   const shifts = _getShiftsCached_().filter(r => r.startISO);
+
+  // v7.11 2026-09-11 — how far the schedule is actually written, and which
+  // events have been declared covered by regular staffing.
+  const horizon = _scheduleHorizon_(shifts);
+  const rules   = _eventStaffingRules_();
 
   // v7.3 2026-09-05 — a shift whose owner is trying to hand it off is not
   // settled staffing. REQUESTED = nobody has taken it; ACCEPTED = someone
@@ -3373,6 +3414,21 @@ function _eventsWithStaffing_(start, end, isManager) {
 
     // Customer contact details and money links are manager-only. Shift notes
     // now go to every staff member (v7.1), so this must not ride along there.
+    // v7.11 2026-09-11 — "not scheduled yet" is a different thing from
+    // "nobody is on it", and "we don't need anyone" is a third. The state
+    // above stays the truth about shifts; these two say how to read it.
+    out.occKey        = String(it.occKey || "");
+    out.seriesKey     = _evtSeriesKey_(it.title);
+    out.beyondHorizon = (out.state !== "staffed") && (s.getTime() > horizon.getTime());
+
+    const rule = rules.byOnce[out.occKey] || rules.bySeries[out.seriesKey] || null;
+    out.noStaffNeeded = !!(rule && out.state !== "staffed");
+    if (out.noStaffNeeded) {
+      out.ruleId    = rule.id;
+      out.ruleScope = rule.scope;
+      out.ruleBy    = rule.createdBy;
+    }
+
     if (isManager) {
       out.customer   = meta.customer;
       out.invoiceUrl = meta.invoiceUrl;
@@ -3384,7 +3440,160 @@ function _eventsWithStaffing_(start, end, isManager) {
   });
 
   events.sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
-  return { ok: true, events: events, warnings: warnings };
+  return {
+    ok: true,
+    events: events,
+    warnings: warnings,
+    // v7.11 2026-09-11
+    horizonISO:   horizon.toISOString(),
+    horizonLabel: _horizonLabel_(horizon),
+    rules:        rules.list
+  };
+}
+
+/**
+ * v7.11 2026-09-11 — How far the schedule is actually built.
+ * Returns the last instant that counts as "scheduled". The current week always
+ * counts, however thin it looks by Friday — it is being worked right now, and
+ * a gap in it is real either way.
+ */
+function _scheduleHorizon_(shifts) {
+  const now = new Date();
+  const d0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dow = d0.getDay();
+  const monday = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() - (dow === 0 ? 6 : dow - 1));
+
+  // Calendar arithmetic, not milliseconds: adding 7 * 86400000 across a DST
+  // change lands an hour off and can put a Sunday-night shift in the wrong week.
+  let end = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7);
+
+  for (let w = 1; w <= HORIZON_MAX_WEEKS; w++) {
+    const ws = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + w * 7);
+    const we = new Date(ws.getFullYear(), ws.getMonth(), ws.getDate() + 7);
+    let n = 0;
+    for (let i = 0; i < shifts.length; i++) {
+      const t = new Date(shifts[i].startISO);
+      if (t >= ws && t < we) n++;
+    }
+    if (n < HORIZON_MIN_SHIFTS) break;
+    end = we;
+  }
+  return new Date(end.getTime() - 1);   // 23:59:59.999 of the last built day
+}
+
+function _horizonLabel_(d) {
+  return Utilities.formatDate(d, TZ_CENTRAL, "EEE MMM d");
+}
+
+/**
+ * v7.11 2026-09-11 — "no extra staff needed" rules.
+ *
+ * Two scopes. ONCE is keyed on the same identity the dedupe uses, so it
+ * survives the feed being re-read but not the event being moved — a moved
+ * event is a new decision and should come back. SERIES is keyed on the
+ * normalized title, which is what makes this usable at all: Zoho expands
+ * recurrence server-side, so trivia is ~50 separate events and dismissing them
+ * one at a time would be 50 clicks.
+ */
+function _evtSeriesKey_(title) {
+  return String(title || "")
+    .toLowerCase()
+    .replace(/\(\s*tentative\s*\)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+let _evtRulesCache_ = null;
+
+function _eventStaffingRules_() {
+  if (_evtRulesCache_) return _evtRulesCache_;
+  const out = { byOnce: {}, bySeries: {}, list: [] };
+  let rows = [];
+  try { rows = _readAll_(SHEET_EVENT_RULES); } catch (_) { rows = []; }
+  rows.forEach(r => {
+    if (String(r.active).toUpperCase() === "FALSE") return;
+    const key = String(r.key || "").trim();
+    if (!key) return;
+    const scope = String(r.scope || "").toLowerCase() === "series" ? "series" : "once";
+    const rec = { id: String(r.id || ""), scope: scope, key: key,
+                  label: String(r.label || ""), note: String(r.note || ""),
+                  createdBy: String(r.createdBy || ""), createdAtISO: String(r.createdAtISO || "") };
+    if (scope === "series") out.bySeries[key] = rec; else out.byOnce[key] = rec;
+    out.list.push(rec);
+  });
+  _evtRulesCache_ = out;
+  return out;
+}
+
+function _ensureEventRulesSheet_() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  _ensureSheet_(ss, SHEET_EVENT_RULES,
+    ["id", "scope", "key", "label", "note", "createdBy", "createdAtISO", "active"]);
+}
+
+/** Manager-only: mark an event (or a whole recurring title) as needing no
+ *  extra shift. Nothing is deleted and nothing is hidden — the row stays in
+ *  the card under "covered by regular staffing", with an undo. */
+function api_setEventStaffing(data) {
+  const me = _requireSession_(data.sessionToken);
+  if (!me.isManager) throw new Error("Managers only");
+
+  const scope = String(data.scope || "once").toLowerCase() === "series" ? "series" : "once";
+  const key   = String(data.key || "").trim();
+  if (!key) throw new Error("Missing event key");
+
+  _ensureEventRulesSheet_();
+  const who = me.name || me.email || "";
+  const now = new Date().toISOString();
+
+  // Re-activate an existing row rather than piling up duplicates for the same
+  // event — the sheet is meant to be readable by a human.
+  const hit = _readAll_(SHEET_EVENT_RULES).filter(r =>
+    String(r.scope || "").toLowerCase() === scope && String(r.key || "").trim() === key)[0];
+
+  let id;
+  if (hit) {
+    id = String(hit.id);
+    _updateWhere_(SHEET_EVENT_RULES, "id", id, {
+      active: "TRUE", label: String(data.label || hit.label || ""),
+      note: String(data.note || hit.note || ""), createdBy: who, createdAtISO: now
+    });
+  } else {
+    id = _uuid_();
+    _appendRow_(SHEET_EVENT_RULES, {
+      id: id, scope: scope, key: key, label: String(data.label || ""),
+      note: String(data.note || ""), createdBy: who, createdAtISO: now, active: "TRUE"
+    });
+  }
+
+  _evtRulesCache_ = null;
+  return { ok: true, id: id, scope: scope, key: key };
+}
+
+/** Manager-only: undo. Rows are deactivated, never deleted — who decided a
+ *  night needed nobody, and when, is worth keeping. */
+function api_clearEventStaffing(data) {
+  const me = _requireSession_(data.sessionToken);
+  if (!me.isManager) throw new Error("Managers only");
+
+  let n = 0;
+  const id = String(data.id || "").trim();
+  try {
+    if (id) {
+      n = _updateWhere_(SHEET_EVENT_RULES, "id", id, { active: "FALSE" });
+    } else {
+      const scope = String(data.scope || "").toLowerCase() === "series" ? "series" : "once";
+      const key   = String(data.key || "").trim();
+      _readAll_(SHEET_EVENT_RULES).forEach(r => {
+        if (String(r.scope || "").toLowerCase() === scope && String(r.key || "").trim() === key) {
+          n += _updateWhere_(SHEET_EVENT_RULES, "id", String(r.id), { active: "FALSE" });
+        }
+      });
+    }
+  } catch (e) { Logger.log("clearEventStaffing: " + e); }
+
+  _evtRulesCache_ = null;
+  return { ok: true, cleared: n };
 }
 
 // v7.5 2026-09-10 — plain-English source, for the card and the digest email.
@@ -3647,7 +3856,12 @@ function notifyUnstaffedEvents() {
   catch (e) { Logger.log("notifyUnstaffedEvents failed: " + e); return; }
   if (!res || !res.ok) return;
 
-  const needs = res.events.filter(e => e.state !== "staffed");
+  // v7.11 2026-09-11 — email only about weeks that have actually been built,
+  // and never about an event somebody has already said needs nobody. The
+  // horizon moving forward changes the key on its own, so the morning after a
+  // new week is written its gaps arrive in the digest.
+  const needs = res.events.filter(e =>
+    e.state !== "staffed" && !e.beyondHorizon && !e.noStaffNeeded);
   const today = Utilities.formatDate(new Date(), TZ_CENTRAL, "yyyy-MM-dd");
 
   if (!needs.length) {
@@ -3668,7 +3882,7 @@ function notifyUnstaffedEvents() {
 
   const subject = EMAIL_SETTINGS.managerNotifySubjectPrefix + " " + needs.length +
                   (needs.length === 1 ? " event needs staff" : " events need staff");
-  const html = _unstaffedDigestHtml_(needs, changed);
+  const html = _unstaffedDigestHtml_(needs, changed, res.horizonLabel);
 
   to.forEach(addr => {
     try {
@@ -3692,7 +3906,7 @@ function _managerEmails_() {
   return Object.keys(out);
 }
 
-function _unstaffedDigestHtml_(needs, changed) {
+function _unstaffedDigestHtml_(needs, changed, horizonLabel) {
   const soonCut = Date.now() + 7 * 86400000;
 
   const row = (e) => {
@@ -3737,6 +3951,10 @@ function _unstaffedDigestHtml_(needs, changed) {
     '<h2 style="font-size:17px;margin:0 0 4px">Events needing staff</h2>' +
     '<div style="font-size:13px;color:#666;margin-bottom:12px">' + lead +
       ' Next ' + OPS_NOTIFY_DAYS + ' days · Toast bookings and house programming.</div>' +
+    (horizonLabel
+      ? '<div style="font-size:12px;color:#666;margin:-8px 0 12px">Counting only what is inside the built schedule — through <b>' +
+        _esc_(horizonLabel) + '</b>. Later events are not listed here.</div>'
+      : '') +
     '<table style="border-collapse:collapse;width:100%">' + needs.map(row).join("") + '</table>' +
     '<p style="font-size:13px;margin-top:16px"><a href="' + SITE_URL + '" style="color:#96321F;font-weight:700">Open the scheduler</a></p>' +
     '<p style="font-size:11px;color:#999">Sent when the picture changes, plus a Monday recap. Nothing to do means no email.</p>' +

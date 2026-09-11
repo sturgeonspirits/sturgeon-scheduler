@@ -493,3 +493,59 @@ Deletions here pass notify=false: an entry error was never a real shift, so no
 "Shift Canceled" email goes to the person for it.
 Both use function-local constants, never top-level ones — Apps Script shares one
 global scope across every file in the project.
+
+v3.31 2026-09-11 — Jump to a date (frontend only):
+The ◀ ▶ arrows only answer "next week". A date box now sits in the same nav row
+on every schedule view (Week, Month, Staffing Grid) and on both payroll
+summaries, showing the date you are currently parked on — so it reads as a
+position indicator as much as a control. Picking a date moves the week anchor
+AND the month anchor, so switching sub-views afterwards lands on the same date.
+On the Schedule tab the chosen day's card is scrolled under the sticky header,
+the same treatment "Today" gets; day cards now carry data-daydate for that.
+Deliberately type="date" even in Month mode — type="month" is unsupported in
+Firefox and degrades silently to a text box. Navigation still calls
+render(false): render(true) would invalidateAll() and throw away every loaded
+week (the v3.22 rule). The loading scaffold carries a disabled copy of the same
+box so the nav card doesn't change height when real data lands.
+
+v7.11 / v3.32 2026-09-11 — The events card stops crying wolf (backend + frontend):
+Two changes with one cause. The card graded 60 days of calendar against a
+schedule that only exists a week or two out, so "needs shifts" on a November
+event could equally mean "that week isn't written yet" or "something extra is
+being suggested here" — and red that is usually wrong is red you stop reading.
+
+1. THE SCHEDULING HORIZON. Derived from the shifts themselves, not configured:
+walk forward from this week and stop at the first week carrying fewer than
+HORIZON_MIN_SHIFTS (3) shifts — that is how far the schedule is genuinely
+built. HORIZON_MAX_WEEKS (12) caps it so one shift pencilled into December
+can't drag it out. The current week always counts, however thin. Events past
+the horizon come back as beyondHorizon: they sit in a collapsed "Not scheduled
+yet · N · after Sun Sep 21" group, get a neutral pill instead of a red one, say
+"No shifts entered for that week yet", and are excluded from the 8am manager
+digest entirely. The digest email now states the date it counted through.
+As a new week gets built the horizon moves, the digest's state key changes on
+its own, and that week's real gaps arrive the next morning.
+
+2. "NO EXTRA STAFF NEEDED". Some programming is covered by whoever is already
+on the bar (Karl: Smartish Trivia needs no extra staffer). Each row gets a "No
+extra staff" button offering two scopes: "Every <event name>" or "Just this
+one". Series is offered first and matters most — Zoho expands recurrence
+server-side, so trivia is ~50 separate events and one-at-a-time would be 50
+clicks. Rules live in a new sheet tab, EventStaffing (created on first use:
+id, scope, key, label, note, createdBy, createdAtISO, active), so they can be
+read and removed by hand. Undo sets active=FALSE rather than deleting the row —
+who decided a night needed nobody, and when, is worth keeping. Dismissed events
+are NOT hidden: they collapse into "Covered by regular staffing · N" with an
+Undo on each. New actions: setEventStaffing, clearEventStaffing (managers only).
+
+Also: "suggested shift 6:00 – 9:30 PM" now reads "nothing scheduled — suggest
+6:00 – 9:30 PM". It only ever appeared when no matching shift was found, but
+the old wording could be read as proposing a second shift on top of one that
+already existed.
+
+No new triggers — installTriggers() does not need re-running. Redeploy the
+Apps Script web app after pasting code.gs.
+Verified: 34 assertions (node, against the real functions sliced out of both
+files) — horizon boundaries incl. the stray-December-shift case and a thin
+current week, series-key normalization, the three-way card split, pill colors,
+the undo payload, and label escaping.
