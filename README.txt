@@ -549,3 +549,13 @@ Verified: 34 assertions (node, against the real functions sliced out of both
 files) — horizon boundaries incl. the stray-December-shift case and a thin
 current week, series-key normalization, the three-way card split, pill colors,
 the undo payload, and label escaping.
+
+v3.33 2026-09-11 — "No extra staff" only where there is no shift (frontend only):
+Karl: "if the shift is created, don't add the button — I obviously made a
+shift." The button was on every row that wasn't fully staffed, including
+unclaimed (a shift exists, nobody has taken it) and swap pending (someone is on
+it, trying to hand it off). Those rows ask WHO, not WHETHER, and the answer is
+never "nobody needs to be" — offering it there invited a real gap to be waved
+off in one click. Now it appears only on state === "unstaffed", inside the
+built schedule and in the "not scheduled yet" group alike. Verified: 40
+assertions, 6 of them on button placement across the three states.
