@@ -559,3 +559,17 @@ never "nobody needs to be" — offering it there invited a real gap to be waved
 off in one click. Now it appears only on state === "unstaffed", inside the
 built schedule and in the "not scheduled yet" group alike. Verified: 40
 assertions, 6 of them on button placement across the three states.
+
+v3.34 2026-10-02 — Check-offs are instant and undoable (frontend only):
+Karl: "I can't uncheck 'done' on a task. I hit it by accident because the
+response is so slow." Three causes, all fixed in index.html: (1) the box didn't
+flip until Apps Script answered, so a second tap re-sent "done" instead of
+undoing it — the box now flips on tap; (2) on the on-shift screen, check-then-
+uncheck fired two parallel requests that could land backwards and leave the
+task done — saves for one task now go out one at a time, and only the last
+state tapped is written; (3) a shift task with no assignee disappeared from
+"Mine & Open" once done, so there was nothing to untick — anything you checked
+off now stays in your Done list. Every check-off also shows a 5-second "Marked
+done · Undo" toast. No backend change; no Apps Script redeploy needed.
+Verified: JS syntax check + ordering test (check/uncheck/check/uncheck while a
+save is slow → sheet ends unchecked; check/uncheck/check → ends checked).

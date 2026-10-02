@@ -241,6 +241,9 @@
       transition:opacity 0.2s;
     }
     .todo-item.done { opacity:0.45; }
+    /* v3.34 2026-10-02 — the Undo toast must take taps (plain toasts don't) */
+    .toast.actionable { pointer-events:auto; display:flex; align-items:center; gap:14px; padding:8px 8px 8px 18px; }
+    .toast .toast-undo { background:transparent; border:1px solid rgba(255,255,255,0.5); color:#fff; font-weight:800; font-size:13px; padding:8px 14px; border-radius:20px; cursor:pointer; min-height:36px; }
     .todo-item.done .todo-text { text-decoration:line-through; color:var(--muted); }
     .todo-check {
       width:26px; height:26px; min-width:26px; border:2px solid var(--border); border-radius:7px;
@@ -771,6 +774,29 @@
     t.classList.add("visible");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove("visible"), ms);
+    t.classList.remove("actionable"); // v3.34 2026-10-02
+  }
+
+  // v3.34 2026-10-02 — a toast with an Undo button. Karl: "I can't uncheck
+  // 'done' on a task. I hit it by accident because the response is so slow."
+  // Every check-off now offers five seconds to take it back, from any screen.
+  function showUndoToast(msg, onUndo, ms = 5000) {
+    const t = document.getElementById("toast");
+    t.textContent = "";
+    const span = document.createElement("span");
+    span.textContent = msg;
+    const btn = document.createElement("button");
+    btn.className = "toast-undo";
+    btn.textContent = "Undo";
+    btn.onclick = () => {
+      clearTimeout(toastTimer);
+      t.classList.remove("visible", "actionable");
+      onUndo();
+    };
+    t.append(span, btn);
+    t.classList.add("visible", "actionable");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("visible", "actionable"), ms);
   }
 
   // v3.17 2026-08-02 — onOverride turns this into a soft warning: the modal
@@ -1429,13 +1455,14 @@
       const tpl = (templatesCache || []).find(x => x.id === t.templateId);
       if (tpl && tpl.requireProof) { toggleTodo(id, true); dismissNowShift(); return; }
     }
+    // v3.34 2026-10-02 — goes through saveTodoDone so a quick check-then-
+    // uncheck is sent in order (two parallel requests could land backwards and
+    // leave the task done), and offers Undo.
     const newDone = !t.done;
-    t.done = newDone; // optimistic
-    api("toggleTodo", { sessionToken, id, done: newDone, proofValue: "" })
-      .then(() => invalidateCache(["listTodos", "dashSchedule"]))
-      .catch(() => { t.done = !newDone; showToast("Couldn't update — try again"); renderNowShift(myCurrentShift() || {}); });
-    const shift = globalShifts.find(s => s.eventId === nowShiftId);
-    if (shift) renderNowShift(shift);
+    const repaint = () => { const sh = globalShifts.find(s => s.eventId === nowShiftId); if (sh) renderNowShift(sh); };
+    saveTodoDone(id, newDone, "", repaint);
+    repaint();
+    if (newDone) showUndoToast("Marked done", () => { saveTodoDone(id, false, "", repaint); repaint(); });
   }
 
   function attachNowShiftGestures(el) {
@@ -4198,6 +4225,7 @@
 
     if (todosRes.status === "fulfilled") {
       todosCache = todosRes.value.items || [];
+      applyPendingTodoDone(); // v3.34 2026-10-02
     } else {
       todosCache = [];
       if (throwOnError) throw todosRes.reason;
@@ -4498,7 +4526,11 @@
       // shift already belongs to whoever works that shift, so it stays out —
       // same rule the old "Up for Grabs" tab used.
       const isOpen  = t => !t.assignedTo && !t.shiftId;
-      const visible = todos.filter(t => t.assignedTo === me.email || isOpen(t));
+      // v3.34 2026-10-02 — plus anything I checked off myself, so a task
+      // ticked by accident is always in my Done list to untick (shift tasks
+      // with no assignee used to vanish from this tab once done).
+      const doneByMe = t => t.done && t.doneBy && (t.doneBy === me.name || t.doneBy === me.email);
+      const visible = todos.filter(t => t.assignedTo === me.email || isOpen(t) || doneByMe(t));
 
       // Per-row opts so unassigned rows get a Take button and an "up for
       // grabs" tag, while the person's own rows stay as they were.
@@ -4583,6 +4615,72 @@
     finally { btn.disabled = false; btn.textContent = "+ Add"; }
   }
 
+  // v3.34 2026-10-02 — check-offs are instant and reversible.
+  // Before: the box sat at 40% opacity until Apps Script answered (seconds),
+  // so a second tap re-sent "done" instead of undoing it, and the box only
+  // flipped after a full reload. Now the box flips on tap, an Undo toast
+  // appears, and saves for the same task go out one at a time in order —
+  // only the last state you tapped is what ends up in the sheet.
+  const todoSaveQueue = new Map();    // id -> next {done, proofValue} waiting behind an in-flight save (or null)
+  const todoPendingDone = new Map();  // id -> done state not yet confirmed by the server
+
+  // Flip every checkbox for this task that's on screen right now.
+  function paintTodoCheck(id, done) {
+    document.querySelectorAll('.js-task-check').forEach(el => {
+      if (el.dataset.id !== id) return;
+      el.classList.toggle('checked', done);
+      el.dataset.done = done ? '1' : '';
+      el.textContent = done ? '✓' : '';
+      const row = el.closest('.todo-item');
+      if (row) { row.classList.toggle('done', done); row.style.opacity = ''; }
+    });
+  }
+
+  // Apply local, not-yet-confirmed check-offs on top of fresh server data so
+  // a reload that raced a save doesn't flip a box back.
+  function applyPendingTodoDone() {
+    for (const [id, done] of todoPendingDone) {
+      const t = todosCache.find(x => x.id === id);
+      if (t) t.done = done;
+    }
+  }
+
+  function saveTodoDone(id, done, proofValue, onFail) {
+    const t = todosCache.find(x => x.id === id);
+    const me = bootstrap.me;
+    if (t) {
+      t.done = done;
+      t.doneBy = done ? (me.name || me.email) : "";
+      if (proofValue) t.proofValue = proofValue;
+    }
+    todoPendingDone.set(id, done);
+    paintTodoCheck(id, done);
+
+    if (todoSaveQueue.has(id)) { todoSaveQueue.set(id, { done, proofValue }); return; }
+    todoSaveQueue.set(id, null);
+    (async () => {
+      let want = { done, proofValue };
+      try {
+        while (want) {
+          await api("toggleTodo", { sessionToken, id, done: want.done, proofValue: want.proofValue });
+          const next = todoSaveQueue.get(id);
+          todoSaveQueue.set(id, null);
+          want = (next && next.done !== want.done) ? next : null;
+        }
+        todoSaveQueue.delete(id);
+        todoPendingDone.delete(id);
+        invalidateCache(["listTodos", "dashSchedule"]);
+        if (!document.getElementById("nowShift") || document.getElementById("nowShift").style.display !== 'flex') render(true);
+      } catch (e) {
+        todoSaveQueue.delete(id);
+        todoPendingDone.delete(id);
+        showToast("Couldn't update that task — try again");
+        invalidateCache(["listTodos", "dashSchedule"]);
+        if (onFail) onFail(); else render(true);
+      }
+    })();
+  }
+
   async function toggleTodo(id, done) {
     // v3 — proof prompt for templates that require a reading
     let proofValue = "";
@@ -4594,12 +4692,8 @@
         if (proofValue === null) return; // cancelled
       }
     }
-    const el = document.getElementById("todo-" + id);
-    if (el) el.style.opacity = "0.4";
-    try {
-      await api("toggleTodo", { sessionToken, id, done, proofValue });
-      render(true);
-    } catch(e) { handleError(e); if (el) el.style.opacity = "1"; }
+    saveTodoDone(id, done, proofValue);
+    if (done) showUndoToast("Marked done", () => saveTodoDone(id, false, ""));
   }
 
   async function deleteTodo(id) {
